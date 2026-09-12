@@ -454,39 +454,34 @@
 
       <!-- 4. OPTIMIZER TAB -->
       <div v-show="activeTab === 'optimizer'" style="display: flex; flex-direction: column; gap: 12px;">
-        <!-- Intelligent Auto-Tuner Card -->
+        <!-- Intelligent Hardware Auto-Tuner Card -->
         <section class="md3-card">
           <div class="card-title-row">
-            <div style="display: flex; align-items: center; gap: 8px;">
-              <div class="icon-badge">
-                <Icons name="zap" :size="16" />
-              </div>
-              <div>
-                <div class="card-title">Intelligent auto-tuning</div>
-                <div style="font-size: 11px; color: var(--on-surface-variant);">
-                  Hardware-tailored network stack &amp; DNS calibration
-                </div>
-              </div>
-            </div>
-            <span class="badge-pill active">{{ telemetry.device.ram_tier || 'standard' }} tier</span>
+            <span class="card-title">
+              <Icons name="zap" :size="14" />
+              <span>Hardware stack auto-tuning</span>
+            </span>
+            <span class="badge-pill active">
+              {{ Math.round((telemetry.device.ram_total_mb || 4096) / 1024) }} GB RAM
+            </span>
           </div>
 
-          <p style="font-size: 11.5px; color: var(--on-surface-variant); line-height: 1.45;">
-            Analyzes phone hardware profile, benchmarks DNS latency, and tunes kernel TCP parameters for peak network performance.
-          </p>
+          <div style="font-size: 11px; color: var(--on-surface-variant); margin-top: -6px;">
+            Optimized for {{ telemetry.device.brand || 'Device' }} {{ telemetry.device.model }} • {{ (telemetry.device.platform || 'universal').toUpperCase() }}
+          </div>
 
           <div class="hardware-strip">
             <div class="hardware-col">
-              <span class="hw-label">Device</span>
+              <span class="hw-label">Hardware profile</span>
               <span class="hw-val truncate-text">{{ telemetry.device.brand }} {{ telemetry.device.model }}</span>
             </div>
             <div class="hardware-col">
               <span class="hw-label">SoC platform</span>
-              <span class="hw-val truncate-text">{{ telemetry.device.platform || 'Universal' }}</span>
+              <span class="hw-val truncate-text">{{ (telemetry.device.platform || 'Universal').toUpperCase() }}</span>
             </div>
             <div class="hardware-col">
-              <span class="hw-label">RAM capacity</span>
-              <span class="hw-val truncate-text">{{ telemetry.device.ram_total_mb }} MB</span>
+              <span class="hw-label">RAM profile</span>
+              <span class="hw-val truncate-text">{{ (telemetry.device.ram_tier || 'Balanced').toUpperCase() }} ({{ Math.round((telemetry.device.ram_total_mb || 0) / 1024) }} GB)</span>
             </div>
           </div>
 
