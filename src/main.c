@@ -265,8 +265,107 @@ static void get_wifi_details(void) {
     printf("}");
 }
 
-/* Parse Cellular details from getprop and dumpsys */
-static void get_cellular_details(void) {
+/* Device Hardware & Platform Intelligence */
+static void get_device_details(char *out_tier, size_t tier_len) {
+    char brand[64] = "unknown";
+    char model[64] = "unknown";
+    char platform[64] = "unknown";
+    char release[32] = "unknown";
+    char sdk[16] = "0";
+
+    read_cmd_line("getprop ro.product.brand 2>/dev/null", brand, sizeof(brand));
+    read_cmd_line("getprop ro.product.model 2>/dev/null", model, sizeof(model));
+    read_cmd_line("getprop ro.board.platform 2>/dev/null || getprop ro.soc.manufacturer 2>/dev/null", platform, sizeof(platform));
+    read_cmd_line("getprop ro.build.version.release 2>/dev/null", release, sizeof(release));
+    read_cmd_line("getprop ro.build.version.sdk 2>/dev/null", sdk, sizeof(sdk));
+
+    /* Parse RAM from /proc/meminfo */
+    unsigned long mem_total_kb = 0;
+    FILE *mf = fopen("/proc/meminfo", "r");
+    if (mf) {
+        char line[256];
+        while (fgets(line, sizeof(line), mf)) {
+            if (sscanf(line, "MemTotal: %lu kB", &mem_total_kb) == 1) break;
+        }
+        fclose(mf);
+    }
+    int ram_mb = (int)(mem_total_kb / 1024);
+    const char *ram_tier = "standard";
+    if (ram_mb < 3800) ram_tier = "low";
+    else if (ram_mb > 8192) ram_tier = "high";
+
+    if (out_tier && tier_len > 0) {
+        strncpy(out_tier, ram_tier, tier_len - 1);
+        out_tier[tier_len - 1] = '\0';
+    }
+
+    printf("\"device\":{");
+    printf("\"brand\":"); json_print_escaped(brand); printf(",");
+    printf("\"model\":"); json_print_escaped(model); printf(",");
+    printf("\"platform\":"); json_print_escaped(platform); printf(",");
+    printf("\"android_ver\":"); json_print_escaped(release); printf(",");
+    printf("\"api_level\":%d,", atoi(sdk));
+    printf("\"ram_total_mb\":%d,", ram_mb);
+    printf("\"ram_tier\":"); json_print_escaped(ram_tier);
+    printf("}");
+}
+
+/* Multi-SIM Slot Detection */
+static void get_sim_details(int *out_active_slot) {
+    char sim_states[64] = "absent,absent";
+    char sim_ops[128] = "";
+    char active_sub[16] = "1";
+
+    read_cmd_line("getprop gsm.sim.state 2>/dev/null", sim_states, sizeof(sim_states));
+    read_cmd_line("getprop gsm.sim.operator.alpha 2>/dev/null", sim_ops, sizeof(sim_ops));
+    read_cmd_line("settings get global multi_sim_data_call 2>/dev/null", active_sub, sizeof(active_sub));
+
+    char state0[32] = "absent", state1[32] = "absent";
+    char op0[64] = "", op1[64] = "";
+
+    char *comma = strchr(sim_states, ',');
+    if (comma) {
+        *comma = '\0';
+        strncpy(state0, sim_states, sizeof(state0) - 1);
+        strncpy(state1, comma + 1, sizeof(state1) - 1);
+    } else {
+        strncpy(state0, sim_states, sizeof(state0) - 1);
+    }
+
+    for (char *c = state0; *c; c++) *c = tolower((unsigned char)*c);
+    for (char *c = state1; *c; c++) *c = tolower((unsigned char)*c);
+
+    char *op_comma = strchr(sim_ops, ',');
+    if (op_comma) {
+        *op_comma = '\0';
+        strncpy(op0, sim_ops, sizeof(op0) - 1);
+        strncpy(op1, op_comma + 1, sizeof(op1) - 1);
+    } else {
+        strncpy(op0, sim_ops, sizeof(op0) - 1);
+    }
+
+    int active_slot = 0;
+    if (strcmp(state0, "absent") == 0 && strcmp(state1, "absent") != 0) {
+        active_slot = 1;
+    } else if (strcmp(state0, "absent") != 0 && strcmp(state1, "absent") != 0) {
+        int sub = atoi(active_sub);
+        if (sub >= 2) active_slot = 1;
+    }
+
+    if (out_active_slot) *out_active_slot = active_slot;
+
+    printf("\"sim\":{");
+    printf("\"active_slot\":%d,", active_slot);
+    printf("\"active_subid\":%d,", atoi(active_sub) > 0 ? atoi(active_sub) : (active_slot + 1));
+    printf("\"slot0\":{\"inserted\":%s,\"state\":", strcmp(state0, "absent") != 0 ? "true" : "false");
+    json_print_escaped(state0); printf(",\"operator\":"); json_print_escaped(op0); printf("},");
+    printf("\"slot1\":{\"inserted\":%s,\"state\":", strcmp(state1, "absent") != 0 ? "true" : "false");
+    json_print_escaped(state1); printf(",\"operator\":"); json_print_escaped(op1); printf("}");
+    printf("}");
+}
+
+/* Parse Cellular details across Qualcomm, MediaTek, Exynos, and Tensor */
+static void get_cellular_details(int *out_rsrp, int *out_sinr) {
     char operator_name[128] = "unknown";
     char network_type[64] = "unknown";
     int rsrp = 0;
@@ -281,7 +380,6 @@ static void get_cellular_details(void) {
     char prop_type[128] = "";
     read_cmd_line("getprop gsm.sim.operator.alpha 2>/dev/null", prop_op, sizeof(prop_op));
     if (strlen(prop_op) > 0 && strcmp(prop_op, ",") != 0) {
-        /* If comma present, pick first non-empty */
         char *comma = strchr(prop_op, ',');
         if (comma && comma != prop_op) *comma = '\0';
         else if (comma && comma == prop_op && *(comma + 1) != '\0') {
@@ -302,9 +400,10 @@ static void get_cellular_details(void) {
         }
     }
 
-    FILE *p = popen("dumpsys telephony.registry 2>/dev/null | head -n 80", "r");
+    /* Targeted dumpsys grep: fast and immune to line truncation */
+    FILE *p = popen("dumpsys telephony.registry 2>/dev/null | grep -E 'mSignalStrength|CellSignalStrength|mCellIdentity|mOperatorAlpha' | head -n 40", "r");
     if (p) {
-        char line[512];
+        char line[1024];
         while (fgets(line, sizeof(line), p)) {
             char *op = strstr(line, "mOperatorAlphaLong=");
             if (op) {
@@ -316,47 +415,91 @@ static void get_cellular_details(void) {
                 }
             }
 
-            char *lte = strstr(line, "CellSignalStrengthLte: ");
+            /* Match LTE */
+            char *lte = strstr(line, "CellSignalStrengthLte");
             if (lte) {
                 if (strcmp(network_type, "unknown") == 0) strcpy(network_type, "LTE");
-                char *rp = strstr(lte, "rsrp=");
-                if (rp) rsrp = atoi(rp + 5);
-                char *rq = strstr(lte, "rsrq=");
-                if (rq) rsrq = atoi(rq + 5);
-                char *sn = strstr(lte, "rssnr=");
-                if (sn) sinr = atoi(sn + 6);
-                char *lv = strstr(lte, "level=");
-                if (lv) level = atoi(lv + 6);
+                char *rp = strstr(lte, "rsrp");
+                if (rp) {
+                    char *eq = strchr(rp, '=');
+                    if (eq) rsrp = atoi(eq + 1);
+                }
+                char *rq = strstr(lte, "rsrq");
+                if (rq) {
+                    char *eq = strchr(rq, '=');
+                    if (eq) rsrq = atoi(eq + 1);
+                }
+                char *sn = strstr(lte, "rssnr");
+                if (!sn) sn = strstr(lte, "sinr");
+                if (sn) {
+                    char *eq = strchr(sn, '=');
+                    if (eq) sinr = atoi(eq + 1);
+                }
+                char *lv = strstr(lte, "level");
+                if (lv) {
+                    char *eq = strchr(lv, '=');
+                    if (eq) level = atoi(eq + 1);
+                }
             }
 
-            char *nr = strstr(line, "CellSignalStrengthNr:{");
+            /* Match 5G NR */
+            char *nr = strstr(line, "CellSignalStrengthNr");
             if (nr) {
                 strcpy(network_type, "5G NR");
-                char *rp = strstr(nr, "ssRsrp = ");
-                if (rp) rsrp = atoi(rp + 9);
-                char *rq = strstr(nr, "ssRsrq = ");
-                if (rq) rsrq = atoi(rq + 9);
-                char *sn = strstr(nr, "ssSinr = ");
-                if (sn) sinr = atoi(sn + 9);
-                char *lv = strstr(nr, "level = ");
-                if (lv) level = atoi(lv + 8);
+                char *rp = strstr(nr, "ssRsrp");
+                if (!rp) rp = strstr(nr, "csiRsrp");
+                if (rp) {
+                    char *eq = strchr(rp, '=');
+                    if (eq) rsrp = atoi(eq + 1);
+                }
+                char *rq = strstr(nr, "ssRsrq");
+                if (!rq) rq = strstr(nr, "csiRsrq");
+                if (rq) {
+                    char *eq = strchr(rq, '=');
+                    if (eq) rsrq = atoi(eq + 1);
+                }
+                char *sn = strstr(nr, "ssSinr");
+                if (!sn) sn = strstr(nr, "csiSinr");
+                if (sn) {
+                    char *eq = strchr(sn, '=');
+                    if (eq) sinr = atoi(eq + 1);
+                }
+                char *lv = strstr(nr, "level");
+                if (lv) {
+                    char *eq = strchr(lv, '=');
+                    if (eq) level = atoi(lv + 1);
+                }
             }
 
-            char *cid = strstr(line, "mCellIdentity=");
+            /* Cell ID */
+            char *cid = strstr(line, "mCellIdentity");
             if (cid) {
                 char *ci = strstr(cid, "mCi=");
-                if (ci) cell_id = atoll(ci + 4);
+                if (!ci) ci = strstr(cid, "mCid=");
+                if (!ci) ci = strstr(cid, "cid=");
+                if (ci) {
+                    char *eq = strchr(ci, '=');
+                    if (eq) cell_id = atoll(eq + 1);
+                }
             }
         }
         pclose(p);
     }
 
-    read_cmd_line("cmd phone get-allowed-network-types-for-users -s 0 2>/dev/null", allowed_types, sizeof(allowed_types));
+    /* Try reading allowed network types */
+    if (read_cmd_line("cmd phone get-allowed-network-types-for-users -s 0 2>/dev/null", allowed_types, sizeof(allowed_types)) != 0 || strlen(allowed_types) == 0) {
+        if (read_cmd_line("cmd phone get-allowed-network-types-for-users 2>/dev/null", allowed_types, sizeof(allowed_types)) != 0 || strlen(allowed_types) == 0) {
+            read_cmd_line("settings get global preferred_network_mode 2>/dev/null", allowed_types, sizeof(allowed_types));
+        }
+    }
 
     /* Treat sentinel values */
     if (rsrp == 2147483647 || rsrp > 0) rsrp = 0;
     if (rsrq == 2147483647 || rsrq > 0) rsrq = 0;
     if (sinr == 2147483647) sinr = 0;
+
+    if (out_rsrp) *out_rsrp = rsrp;
+    if (out_sinr) *out_sinr = sinr;
 
     printf("\"cellular\":{");
     printf("\"operator\":"); json_print_escaped(operator_name); printf(",");
@@ -370,56 +513,153 @@ static void get_cellular_details(void) {
     printf("}");
 }
 
+/* Intelligent Network Health & Quality Index */
+static void get_network_health(int is_wifi, int is_cell, int wifi_rssi, int wifi_speed, int cell_rsrp, int cell_sinr) {
+    int score = 0;
+    const char *grade = "fair";
+    char summary[128] = "Idle network connection";
+    char recommendation[256] = "Network parameters active";
+
+    if (is_wifi) {
+        score = 55;
+        if (wifi_rssi != 0) {
+            if (wifi_rssi >= -60) score += 25;
+            else if (wifi_rssi >= -72) score += 15;
+            else score += 5;
+        } else score += 15;
+
+        if (wifi_speed >= 300) score += 20;
+        else if (wifi_speed >= 100) score += 15;
+        else if (wifi_speed >= 40) score += 10;
+        else score += 5;
+
+        if (score >= 85) {
+            grade = "optimal";
+            snprintf(summary, sizeof(summary), "High-speed Wi-Fi connection (%d Mbps)", wifi_speed > 0 ? wifi_speed : 100);
+            strcpy(recommendation, "Low RF noise, peak bufferbloat resistance");
+        } else if (score >= 70) {
+            grade = "good";
+            strcpy(summary, "Stable Wi-Fi link");
+            strcpy(recommendation, "Good signal coverage");
+        } else {
+            grade = "fair";
+            strcpy(summary, "Weak Wi-Fi signal");
+            strcpy(recommendation, "Move closer to access point or enable roaming");
+        }
+    } else if (is_cell) {
+        score = 50;
+        if (cell_rsrp != 0) {
+            if (cell_rsrp >= -85) score += 25;
+            else if (cell_rsrp >= -100) score += 15;
+            else score += 5;
+        } else score += 10;
+
+        if (cell_sinr >= 12) score += 25;
+        else if (cell_sinr >= 5) score += 15;
+        else score += 5;
+
+        if (score >= 80) {
+            grade = "optimal";
+            strcpy(summary, "Strong cellular carrier link");
+            strcpy(recommendation, "Clean RF SNR, optimal tower attachment");
+        } else if (score >= 65) {
+            grade = "good";
+            strcpy(summary, "Good cellular link");
+            strcpy(recommendation, "Adequate coverage");
+        } else {
+            grade = "fair";
+            strcpy(summary, "Low cellular signal quality");
+            strcpy(recommendation, "Tap 'Refresh tower' or switch to Wi-Fi");
+        }
+    } else {
+        score = 20;
+        grade = "poor";
+        strcpy(summary, "No active default gateway route");
+        strcpy(recommendation, "Connect to Wi-Fi or mobile data");
+    }
+
+    if (score > 100) score = 100;
+    if (score < 10) score = 10;
+
+    printf("\"health\":{");
+    printf("\"score\":%d,", score);
+    printf("\"grade\":"); json_print_escaped(grade); printf(",");
+    printf("\"summary\":"); json_print_escaped(summary); printf(",");
+    printf("\"recommendation\":"); json_print_escaped(recommendation);
+    printf("}");
+}
+
 /* Comprehensive System & Network Info */
 static int cmd_info(void) {
     printf("{");
 
-    /* 1. Wi-Fi */
+    /* 1. Device hardware intelligence */
+    char ram_tier[32] = "standard";
+    get_device_details(ram_tier, sizeof(ram_tier));
+    printf(",");
+
+    /* 2. SIM slots */
+    int active_slot = 0;
+    get_sim_details(&active_slot);
+    printf(",");
+
+    /* 3. Wi-Fi */
     get_wifi_details();
     printf(",");
 
-    /* 2. Cellular */
-    get_cellular_details();
+    /* 4. Cellular */
+    int cell_rsrp = 0, cell_sinr = 0;
+    get_cellular_details(&cell_rsrp, &cell_sinr);
     printf(",");
 
-    /* 3. Default route and active interfaces */
+    /* 5. Default route via ip route get (highest precision on Android) */
     char def_gateway[64] = "";
     char def_iface[64] = "";
-    FILE *rf = popen("ip route show table 0 2>/dev/null | grep -m1 'default via' || ip route show default 2>/dev/null", "r");
+    char src_ip[64] = "";
+    FILE *rf = popen("ip route get 1.1.1.1 2>/dev/null || ip route show table 0 2>/dev/null | grep -m1 'default via' || ip route show default 2>/dev/null", "r");
     if (rf) {
-        char rline[256];
+        char rline[512];
         if (fgets(rline, sizeof(rline), rf)) {
-            if (sscanf(rline, "default via %63s dev %63s", def_gateway, def_iface) < 2) {
-                /* Fallback if format is slightly different */
-                char *via = strstr(rline, "via ");
-                if (via) sscanf(via + 4, "%63s", def_gateway);
-                char *dev = strstr(rline, "dev ");
-                if (dev) sscanf(dev + 4, "%63s", def_iface);
-            }
+            char *via = strstr(rline, "via ");
+            if (via) sscanf(via + 4, "%63s", def_gateway);
+            char *dev = strstr(rline, "dev ");
+            if (dev) sscanf(dev + 4, "%63s", def_iface);
+            char *src = strstr(rline, "src ");
+            if (src) sscanf(src + 4, "%63s", src_ip);
         }
         pclose(rf);
     }
 
     printf("\"network\":{");
     printf("\"gateway\":"); json_print_escaped(def_gateway); printf(",");
-    printf("\"active_iface\":"); json_print_escaped(def_iface);
+    printf("\"active_iface\":"); json_print_escaped(def_iface); printf(",");
+    printf("\"local_ip\":"); json_print_escaped(src_ip);
     printf("},");
 
-    /* 4. TCP parameters */
+    /* 6. Network health diagnosis */
+    int is_wifi = (strncmp(def_iface, "wlan", 4) == 0);
+    int is_cell = (strncmp(def_iface, "rmnet", 5) == 0 || strncmp(def_iface, "ccmni", 5) == 0 || strncmp(def_iface, "pdp", 3) == 0);
+    get_network_health(is_wifi, is_cell, 0, 0, cell_rsrp, cell_sinr);
+    printf(",");
+
+    /* 7. TCP parameters */
     char tcp_cc[64] = "unknown";
     char tcp_avail[256] = "cubic reno";
     char fastopen[16] = "0";
+    char mtu_probing[16] = "0";
     read_sysfs_line("/proc/sys/net/ipv4/tcp_congestion_control", tcp_cc, sizeof(tcp_cc));
     read_sysfs_line("/proc/sys/net/ipv4/tcp_available_congestion_control", tcp_avail, sizeof(tcp_avail));
     read_sysfs_line("/proc/sys/net/ipv4/tcp_fastopen", fastopen, sizeof(fastopen));
+    read_sysfs_line("/proc/sys/net/ipv4/tcp_mtu_probing", mtu_probing, sizeof(mtu_probing));
 
     printf("\"tcp\":{");
     printf("\"current_cc\":"); json_print_escaped(tcp_cc); printf(",");
     printf("\"available_cc\":"); json_print_escaped(tcp_avail); printf(",");
-    printf("\"fastopen\":%d", atoi(fastopen));
+    printf("\"fastopen\":%d,", atoi(fastopen));
+    printf("\"mtu_probing\":%d", atoi(mtu_probing));
     printf("},");
 
-    /* 5. Android system settings */
+    /* 8. Android system settings */
     char dns_mode[64] = "off";
     char dns_specifier[128] = "";
     char wifi_throttle[16] = "1";
@@ -541,6 +781,7 @@ static int cmd_dns_bench(void) {
 }
 
 /* Set Cellular Network Mode / Band Lock */
+/* Set Cellular Network Mode / Band Lock across Android 10-16 */
 static int cmd_set_mode(int slot, const char *mode) {
     if (!mode || !is_safe_input(mode)) {
         printf("{\"error\":\"invalid_mode\"}\n");
@@ -548,20 +789,36 @@ static int cmd_set_mode(int slot, const char *mode) {
     }
 
     const char *bitmask = BM_GLOBAL_AUTO;
-    if (strcmp(mode, "5g_only") == 0) bitmask = BM_5G_ONLY;
-    else if (strcmp(mode, "5g_lte") == 0) bitmask = BM_5G_LTE;
-    else if (strcmp(mode, "lte_only") == 0) bitmask = BM_LTE_ONLY;
-    else if (strcmp(mode, "3g_only") == 0) bitmask = BM_3G_ONLY;
-    else if (strcmp(mode, "2g_only") == 0) bitmask = BM_2G_ONLY;
-    else if (strcmp(mode, "auto") == 0) bitmask = BM_GLOBAL_AUTO;
+    int mode_id = 9;
+    if (strcmp(mode, "5g_only") == 0) { bitmask = BM_5G_ONLY; mode_id = 24; }
+    else if (strcmp(mode, "5g_lte") == 0) { bitmask = BM_5G_LTE; mode_id = 26; }
+    else if (strcmp(mode, "lte_only") == 0) { bitmask = BM_LTE_ONLY; mode_id = 11; }
+    else if (strcmp(mode, "3g_only") == 0) { bitmask = BM_3G_ONLY; mode_id = 12; }
+    else if (strcmp(mode, "2g_only") == 0) { bitmask = BM_2G_ONLY; mode_id = 1; }
+    else if (strcmp(mode, "auto") == 0) { bitmask = BM_GLOBAL_AUTO; mode_id = 9; }
     else {
         printf("{\"error\":\"unknown_mode\"}\n");
         return 1;
     }
 
+    /* 1. Try modern cmd phone with slot option */
     char cmd[256];
     snprintf(cmd, sizeof(cmd), "cmd phone set-allowed-network-types-for-users -s %d %s >/dev/null 2>&1", slot, bitmask);
     int ret = system(cmd);
+
+    /* 2. Fallback: try without -s for single-SIM or older AOSP */
+    if (ret != 0) {
+        snprintf(cmd, sizeof(cmd), "cmd phone set-allowed-network-types-for-users %s >/dev/null 2>&1", bitmask);
+        ret = system(cmd);
+    }
+
+    /* 3. Fallback: Android 10 global settings */
+    if (ret != 0) {
+        snprintf(cmd, sizeof(cmd), "settings put global preferred_network_mode%d %d >/dev/null 2>&1", slot, mode_id);
+        system(cmd);
+        snprintf(cmd, sizeof(cmd), "settings put global preferred_network_mode %d >/dev/null 2>&1", mode_id);
+        ret = system(cmd);
+    }
 
     ensure_dir(CONF_DIR);
     char conf_cmd[256];
@@ -572,86 +829,112 @@ static int cmd_set_mode(int slot, const char *mode) {
     return 0;
 }
 
-/* Set TCP Congestion Control */
-static int cmd_set_tcp_cc(const char *algo) {
-    if (!algo || !is_safe_input(algo)) {
-        printf("{\"error\":\"invalid_algorithm\"}\n");
-        return 1;
+/* Internal Silent Helpers */
+static void internal_get_ram_tier(char *out_tier, size_t tier_len) {
+    unsigned long mem_total_kb = 0;
+    FILE *mf = fopen("/proc/meminfo", "r");
+    if (mf) {
+        char line[256];
+        while (fgets(line, sizeof(line), mf)) {
+            if (sscanf(line, "MemTotal: %lu kB", &mem_total_kb) == 1) break;
+        }
+        fclose(mf);
     }
+    int ram_mb = (int)(mem_total_kb / 1024);
+    const char *ram_tier = "standard";
+    if (ram_mb < 3800) ram_tier = "low";
+    else if (ram_mb > 8192) ram_tier = "high";
 
-    char avail[256];
-    if (read_sysfs_line("/proc/sys/net/ipv4/tcp_available_congestion_control", avail, sizeof(avail)) != 0) {
-        printf("{\"error\":\"failed_reading_available_cc\"}\n");
-        return 1;
+    if (out_tier && tier_len > 0) {
+        strncpy(out_tier, ram_tier, tier_len - 1);
+        out_tier[tier_len - 1] = '\0';
     }
-
-    if (!strstr(avail, algo)) {
-        printf("{\"error\":\"algorithm_not_supported_by_kernel\"}\n");
-        return 1;
-    }
-
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "sysctl -w net.ipv4.tcp_congestion_control=%s >/dev/null 2>&1", algo);
-    int ret = system(cmd);
-
-    printf("{\"success\":%s,\"algorithm\":\"%s\"}\n", ret == 0 ? "true" : "false", algo);
-    return 0;
 }
 
-/* Set TCP Buffer Profiles */
-static int cmd_set_tcp_profile(const char *profile) {
-    if (!profile || !is_safe_input(profile)) {
-        printf("{\"error\":\"invalid_profile\"}\n");
-        return 1;
-    }
+static int internal_set_tcp_cc(const char *algo) {
+    if (!algo || !is_safe_input(algo)) return -1;
+    char avail[256];
+    if (read_sysfs_line("/proc/sys/net/ipv4/tcp_available_congestion_control", avail, sizeof(avail)) != 0) return -1;
+    if (!strstr(avail, algo)) return -1;
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "sysctl -w net.ipv4.tcp_congestion_control=%s >/dev/null 2>&1", algo);
+    return system(cmd);
+}
 
+static int internal_set_tcp_profile(const char *profile) {
+    if (!profile || !is_safe_input(profile)) return -1;
     int ret = 0;
     if (strcmp(profile, "gaming") == 0) {
-        /* Low latency, minimal queuing */
         ret |= system("sysctl -w net.ipv4.tcp_rmem='4096 87380 4194304' >/dev/null 2>&1");
         ret |= system("sysctl -w net.ipv4.tcp_wmem='4096 16384 4194304' >/dev/null 2>&1");
         ret |= system("sysctl -w net.ipv4.tcp_notsent_lowat=16384 >/dev/null 2>&1");
         ret |= system("sysctl -w net.ipv4.tcp_low_latency=1 >/dev/null 2>&1");
     } else if (strcmp(profile, "throughput") == 0) {
-        /* Expanded buffers for maximum streaming speed */
         ret |= system("sysctl -w net.ipv4.tcp_rmem='8192 1048576 16777216' >/dev/null 2>&1");
         ret |= system("sysctl -w net.ipv4.tcp_wmem='8192 1048576 16777216' >/dev/null 2>&1");
         ret |= system("sysctl -w net.core.rmem_max=16777216 >/dev/null 2>&1");
         ret |= system("sysctl -w net.core.wmem_max=16777216 >/dev/null 2>&1");
         ret |= system("sysctl -w net.ipv4.tcp_window_scaling=1 >/dev/null 2>&1");
+    } else if (strcmp(profile, "adaptive") == 0) {
+        ret |= system("sysctl -w net.ipv4.tcp_rmem='4096 524288 8388608' >/dev/null 2>&1");
+        ret |= system("sysctl -w net.ipv4.tcp_wmem='4096 524288 8388608' >/dev/null 2>&1");
+        ret |= system("sysctl -w net.core.rmem_max=8388608 >/dev/null 2>&1");
+        ret |= system("sysctl -w net.core.wmem_max=8388608 >/dev/null 2>&1");
+        ret |= system("sysctl -w net.ipv4.tcp_window_scaling=1 >/dev/null 2>&1");
     } else if (strcmp(profile, "stock") == 0) {
-        /* Standard kernel defaults */
         ret |= system("sysctl -w net.ipv4.tcp_rmem='4096 87380 6291456' >/dev/null 2>&1");
         ret |= system("sysctl -w net.ipv4.tcp_wmem='4096 16384 4194304' >/dev/null 2>&1");
         ret |= system("sysctl -w net.core.rmem_max=2097152 >/dev/null 2>&1");
         ret |= system("sysctl -w net.core.wmem_max=2097152 >/dev/null 2>&1");
     } else {
-        printf("{\"error\":\"unknown_profile\"}\n");
+        return -1;
+    }
+    return ret;
+}
+
+static int internal_set_dns(const char *mode, const char *specifier) {
+    if (!mode || !is_safe_input(mode)) return -1;
+    char cmd[256];
+    if (strcmp(mode, "hostname") == 0 && specifier && is_safe_input(specifier)) {
+        snprintf(cmd, sizeof(cmd), "settings put global private_dns_specifier %s", specifier);
+        system(cmd);
+        return system("settings put global private_dns_mode hostname");
+    } else if (strcmp(mode, "opportunistic") == 0) {
+        return system("settings put global private_dns_mode opportunistic");
+    } else {
+        return system("settings put global private_dns_mode off");
+    }
+}
+
+/* Set TCP Congestion Control */
+static int cmd_set_tcp_cc(const char *algo) {
+    int ret = internal_set_tcp_cc(algo);
+    if (ret != 0) {
+        printf("{\"error\":\"failed_setting_algorithm\"}\n");
         return 1;
     }
+    printf("{\"success\":true,\"algorithm\":\"%s\"}\n", algo);
+    return 0;
+}
 
-    printf("{\"success\":%s,\"profile\":\"%s\"}\n", ret == 0 ? "true" : "false", profile);
+/* Set TCP Buffer Profiles */
+static int cmd_set_tcp_profile(const char *profile) {
+    int ret = internal_set_tcp_profile(profile);
+    if (ret != 0) {
+        printf("{\"error\":\"failed_setting_profile\"}\n");
+        return 1;
+    }
+    printf("{\"success\":true,\"profile\":\"%s\"}\n", profile);
     return 0;
 }
 
 /* Set Android Private DNS */
 static int cmd_set_dns(const char *mode, const char *specifier) {
-    if (!mode || !is_safe_input(mode)) {
-        printf("{\"error\":\"invalid_mode\"}\n");
+    int ret = internal_set_dns(mode, specifier);
+    if (ret != 0) {
+        printf("{\"error\":\"failed_setting_dns\"}\n");
         return 1;
     }
-
-    char cmd[256];
-    if (strcmp(mode, "hostname") == 0 && specifier && is_safe_input(specifier)) {
-        snprintf(cmd, sizeof(cmd), "settings put global private_dns_specifier %s", specifier);
-        system(cmd);
-        system("settings put global private_dns_mode hostname");
-    } else if (strcmp(mode, "opportunistic") == 0) {
-        system("settings put global private_dns_mode opportunistic");
-    } else {
-        system("settings put global private_dns_mode off");
-    }
-
     printf("{\"success\":true,\"mode\":\"%s\"}\n", mode);
     return 0;
 }
@@ -689,11 +972,150 @@ static int cmd_radio_refresh(void) {
     return 0;
 }
 
+/* Intelligent Auto-Tuner tailored to hardware specs and network health */
+static int cmd_smart_optimize(void) {
+    char ram_tier[32] = "standard";
+    internal_get_ram_tier(ram_tier, sizeof(ram_tier));
+
+    /* 1. Adaptive buffer sizing */
+    const char *applied_profile = "adaptive";
+    if (strcmp(ram_tier, "high") == 0) {
+        internal_set_tcp_profile("throughput");
+        applied_profile = "throughput (16MB)";
+    } else if (strcmp(ram_tier, "low") == 0) {
+        internal_set_tcp_profile("gaming");
+        applied_profile = "compact (4MB)";
+    } else {
+        internal_set_tcp_profile("adaptive");
+        applied_profile = "adaptive (8MB)";
+    }
+
+    /* 2. TCP congestion control auto-selection */
+    char avail[256] = "";
+    const char *chosen_cc = "cubic";
+    if (read_sysfs_line("/proc/sys/net/ipv4/tcp_available_congestion_control", avail, sizeof(avail)) == 0) {
+        if (strstr(avail, "bbr")) {
+            chosen_cc = "bbr";
+            internal_set_tcp_cc("bbr");
+        } else if (strstr(avail, "cubic")) {
+            chosen_cc = "cubic";
+            internal_set_tcp_cc("cubic");
+        }
+    }
+
+    /* 3. Safe TCP latency & MTU tuning */
+    system("sysctl -w net.ipv4.tcp_slow_start_after_idle=0 >/dev/null 2>&1");
+    system("sysctl -w net.ipv4.tcp_fastopen=3 >/dev/null 2>&1");
+    system("sysctl -w net.ipv4.tcp_mtu_probing=1 >/dev/null 2>&1");
+    system("sysctl -w net.ipv4.tcp_autocorking=1 >/dev/null 2>&1");
+    system("sysctl -w net.ipv4.tcp_sack=1 >/dev/null 2>&1");
+    system("sysctl -w net.ipv4.tcp_window_scaling=1 >/dev/null 2>&1");
+    system("settings put global wifi_scan_throttle_enabled 0 >/dev/null 2>&1");
+
+    /* 4. Smart DNS Resolver benchmark and auto-application */
+    const char *dns_candidates[][3] = {
+        {"Cloudflare", "1.1.1.1", "one.one.one.one"},
+        {"Google", "8.8.8.8", "dns.google"},
+        {"Quad9", "9.9.9.9", "dns.quad9.net"},
+        {"AdGuard", "94.140.14.14", "dns.adguard-dns.com"}
+    };
+    int num_dns = sizeof(dns_candidates) / sizeof(dns_candidates[0]);
+    float best_lat = 99999.0f;
+    int best_idx = 0;
+
+    for (int i = 0; i < num_dns; i++) {
+        struct timespec s0, s1;
+        clock_gettime(CLOCK_MONOTONIC, &s0);
+        int sk = socket(AF_INET, SOCK_DGRAM, 0);
+        if (sk >= 0) {
+            struct timeval tv = { .tv_sec = 1, .tv_usec = 200000 };
+            setsockopt(sk, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            struct sockaddr_in sa;
+            memset(&sa, 0, sizeof(sa));
+            sa.sin_family = AF_INET;
+            sa.sin_port = htons(53);
+            inet_pton(AF_INET, dns_candidates[i][1], &sa.sin_addr);
+
+            unsigned char q[] = {
+                0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x06, 'g', 'o', 'o', 'g', 'l', 'e', 0x03, 'c', 'o', 'm', 0x00, 0x00, 0x01, 0x00, 0x01
+            };
+            if (sendto(sk, q, sizeof(q), 0, (struct sockaddr *)&sa, sizeof(sa)) > 0) {
+                unsigned char resp[512];
+                socklen_t slen = sizeof(sa);
+                if (recvfrom(sk, resp, sizeof(resp), 0, (struct sockaddr *)&sa, &slen) > 0) {
+                    clock_gettime(CLOCK_MONOTONIC, &s1);
+                    float lat = (float)((s1.tv_sec - s0.tv_sec) * 1000.0 + (s1.tv_nsec - s0.tv_nsec) / 1000000.0);
+                    if (lat > 0 && lat < best_lat) {
+                        best_lat = lat;
+                        best_idx = i;
+                    }
+                }
+            }
+            close(sk);
+        }
+    }
+
+    if (best_lat < 5000.0f) {
+        internal_set_dns("hostname", dns_candidates[best_idx][2]);
+    }
+
+    /* Save persistent configuration */
+    ensure_dir(CONF_DIR);
+    char conf_cmd[512];
+    snprintf(conf_cmd, sizeof(conf_cmd),
+             "echo '{\"smart_optimized\":true,\"tcp_cc\":\"%s\",\"profile\":\"%s\",\"dns_host\":\"%s\"}' > %s",
+             chosen_cc, applied_profile, best_lat < 5000.0f ? dns_candidates[best_idx][2] : "", CONF_FILE);
+    system(conf_cmd);
+
+    printf("{\"success\":true,\"ram_tier\":"); json_print_escaped(ram_tier); printf(",");
+    printf("\"tcp_cc\":"); json_print_escaped(chosen_cc); printf(",");
+    printf("\"buffer_profile\":"); json_print_escaped(applied_profile); printf(",");
+    printf("\"best_dns\":"); json_print_escaped(dns_candidates[best_idx][0]); printf(",");
+    printf("\"best_dns_latency_ms\":%.1f,", best_lat < 5000.0f ? best_lat : 0.0f);
+    printf("\"tfo\":true,\"mtu_probing\":true}\n");
+
+    return 0;
+}
+
 /* Apply boot profile from config file */
 static int cmd_apply_boot(void) {
     ensure_dir(CONF_DIR);
-    /* Safe default tuning on boot if file doesn't specify otherwise */
+
+    /* 1. Base kernel sysctls */
     system("sysctl -w net.ipv4.tcp_fastopen=3 >/dev/null 2>&1");
+    system("sysctl -w net.ipv4.tcp_slow_start_after_idle=0 >/dev/null 2>&1");
+    system("sysctl -w net.ipv4.tcp_mtu_probing=1 >/dev/null 2>&1");
+    system("sysctl -w net.ipv4.tcp_autocorking=1 >/dev/null 2>&1");
+
+    /* 2. Read saved config if exists */
+    FILE *f = fopen(CONF_FILE, "r");
+    if (f) {
+        char buf[1024];
+        if (fgets(buf, sizeof(buf), f)) {
+            char *mode = strstr(buf, "\"preferred_mode\":\"");
+            char *slot_str = strstr(buf, "\"slot\":");
+            if (mode && slot_str) {
+                mode += 18;
+                char *end = strchr(mode, '"');
+                if (end) {
+                    *end = '\0';
+                    int slot = atoi(slot_str + 7);
+                    cmd_set_mode(slot, mode);
+                }
+            }
+            char *cc = strstr(buf, "\"tcp_cc\":\"");
+            if (cc) {
+                cc += 10;
+                char *end = strchr(cc, '"');
+                if (end) {
+                    *end = '\0';
+                    cmd_set_tcp_cc(cc);
+                }
+            }
+        }
+        fclose(f);
+    }
     return 0;
 }
 
@@ -822,6 +1244,7 @@ static void print_usage(void) {
     printf("  set_dns <mode> [host]   configure android private dns\n");
     printf("  set_tweak <name> <val>  toggle tweaks (wifi_throttle|mobile_data_always|fast_open)\n");
     printf("  radio_refresh           toggle airplane mode to refresh cell tower attachment\n");
+    printf("  smart_optimize          intelligent hardware-tailored network & dns auto-tuning\n");
     printf("  apply_boot              reapply saved network configurations on boot\n");
 }
 
@@ -879,6 +1302,8 @@ int main(int argc, char *argv[]) {
         return cmd_set_tweak(argv[2], atoi(argv[3]));
     } else if (strcmp(cmd, "radio_refresh") == 0) {
         return cmd_radio_refresh();
+    } else if (strcmp(cmd, "smart_optimize") == 0) {
+        return cmd_smart_optimize();
     } else if (strcmp(cmd, "apply_boot") == 0) {
         return cmd_apply_boot();
     } else {

@@ -2,16 +2,18 @@
   <div class="app-shell">
     <!-- Sticky Header -->
     <header class="page-header">
-      <div>
+      <div style="min-width: 0; flex: 1;">
         <div class="page-header-title">HyperNet</div>
-        <div class="page-header-sub">Network toolkit & speedtest</div>
+        <div class="page-header-sub truncate-text">
+          {{ telemetry.device.brand ? `${telemetry.device.brand} ${telemetry.device.model} • Android ${telemetry.device.android_ver}` : 'Network toolkit & speedtest' }}
+        </div>
       </div>
-      <div style="display: flex; align-items: center; gap: 8px;">
-        <span class="badge-pill" :class="isOnline ? 'online' : 'offline'">
+      <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
+        <span class="badge-pill" :class="isOnline ? 'online' : 'offline'" style="max-width: 140px;">
           <Icons :name="isOnline ? (telemetry.wifi.connected ? 'wifi' : 'radio') : 'wifi-off'" :size="11" />
-          <span>{{ isOnline ? (telemetry.wifi.connected ? 'Wi-Fi' : telemetry.cellular.operator || 'Cellular') : 'Offline' }}</span>
+          <span class="truncate-text">{{ isOnline ? (telemetry.wifi.connected ? 'Wi-Fi' : (telemetry.cellular.operator || 'Cellular')) : 'Offline' }}</span>
         </span>
-        <span class="badge-pill" style="cursor: pointer; user-select: none;" @click="refreshTelemetry(true)">
+        <span class="badge-pill" style="cursor: pointer; user-select: none;" @click="refreshTelemetry(true)" title="Tap to refresh">
           <Icons name="refresh" :size="11" :class="{ 'spin-anim': isRefreshing }" />
           <span>v1.0.0</span>
         </span>
@@ -19,26 +21,26 @@
     </header>
 
     <!-- Navigation Tabs -->
-    <div style="padding: 10px 16px 0 16px; background: var(--bg);">
-      <div class="tabs-bar">
+    <div class="tabs-container">
+      <div class="tabs-control">
         <button class="tab-btn" :class="{ active: activeTab === 'speed' }" @click="activeTab = 'speed'">
-          <Icons name="gauge" :size="13" />
+          <Icons name="gauge" :size="12" />
           <span>Speedtest</span>
         </button>
         <button class="tab-btn" :class="{ active: activeTab === 'diagnostics' }" @click="activeTab = 'diagnostics'">
-          <Icons name="wifi" :size="13" />
+          <Icons name="wifi" :size="12" />
           <span>Diagnostics</span>
         </button>
         <button class="tab-btn" :class="{ active: activeTab === 'cellular' }" @click="activeTab = 'cellular'">
-          <Icons name="radio" :size="13" />
+          <Icons name="radio" :size="12" />
           <span>Cellular</span>
         </button>
         <button class="tab-btn" :class="{ active: activeTab === 'optimizer' }" @click="activeTab = 'optimizer'">
-          <Icons name="sliders" :size="13" />
+          <Icons name="sliders" :size="12" />
           <span>Optimizer</span>
         </button>
         <button class="tab-btn" :class="{ active: activeTab === 'console' }" @click="activeTab = 'console'">
-          <Icons name="terminal" :size="13" />
+          <Icons name="terminal" :size="12" />
           <span>Console</span>
         </button>
       </div>
@@ -47,62 +49,86 @@
     <!-- Main Content Area -->
     <main class="content-area">
       <!-- 1. SPEEDTEST TAB -->
-      <div v-show="activeTab === 'speed'" style="display: flex; flex-direction: column; gap: 10px;">
-        <!-- Speed Hero Display Card -->
-        <section class="md3-card speed-hero-container">
-          <!-- Top Row: Route & Server pills -->
-          <div style="display: flex; justify-content: space-between; width: 100%; align-items: center;">
-            <span class="badge-pill">
+      <div v-show="activeTab === 'speed'" style="display: flex; flex-direction: column; gap: 12px;">
+        <!-- Unified Hero Card -->
+        <section class="md3-card speed-hero-card">
+          <!-- Top Row: Route & Server selector -->
+          <div class="hero-top-row">
+            <div class="hero-iface-badge">
               <Icons :name="telemetry.wifi.connected ? 'wifi' : 'radio'" :size="11" />
-              <span>{{ telemetry.network.active_iface ? `${telemetry.network.active_iface} (${telemetry.wifi.ip || 'online'})` : 'Auto interface' }}</span>
-            </span>
-            <span
-              class="badge-pill active"
-              style="cursor: pointer;"
-              @click="toggleServerSelect"
-              title="Click to switch server"
-            >
+              <span class="truncate-text">{{ telemetry.network.active_iface ? `${telemetry.network.active_iface} (${telemetry.network.local_ip || telemetry.wifi.ip || 'online'})` : 'Auto interface' }}</span>
+            </div>
+            <div class="hero-server-badge" @click="toggleServerSelect" title="Click to switch server">
               <Icons name="server" :size="11" />
               <span>{{ selectedServer.name }}</span>
-            </span>
+            </div>
           </div>
 
-          <!-- Digital Speedout Readout -->
-          <div style="text-align: center; margin: 16px 0 4px 0;">
+          <!-- Digital Speed Readout & Phase Status -->
+          <div class="hero-gauge-area">
             <div class="speed-digital-value">{{ speedtestState.instantSpeed.toFixed(1) }}</div>
             <div class="speed-digital-unit">
               {{ speedtestState.phase === 'upload' ? 'Upload Mbps' : (speedtestState.phase === 'download' ? 'Download Mbps' : 'Mbps throughput') }}
             </div>
+            <div class="speed-phase-status">
+              <span v-if="speedtestState.isTesting">
+                {{ formatTestPhase(speedtestState.phase) }} ({{ speedtestState.progressPct }}%)
+              </span>
+              <span v-else-if="speedtestState.lastTestedAt">
+                Last tested {{ formatTimeAgo(speedtestState.lastTestedAt) }}
+              </span>
+              <span v-else>
+                Ready to test active connection
+              </span>
+            </div>
           </div>
 
-          <!-- Phase & Progress indicator -->
-          <div style="font-size: 11px; color: var(--on-surface-variant); margin-bottom: 12px; font-variant-numeric: tabular-nums;">
-            <span v-if="speedtestState.isTesting">
-              {{ formatTestPhase(speedtestState.phase) }} ({{ speedtestState.progressPct }}%)
-            </span>
-            <span v-else-if="speedtestState.lastTestedAt">
-              Last tested {{ formatTimeAgo(speedtestState.lastTestedAt) }}
-            </span>
-            <span v-else>
-              Ready to test any active connection
-            </span>
-          </div>
-
-          <!-- Integrated Rolling Sparkline Chart -->
-          <div class="chart-container" style="margin-bottom: 14px;">
-            <svg viewBox="0 0 300 90" width="100%" height="90" preserveAspectRatio="none">
-              <line x1="0" y1="22" x2="300" y2="22" stroke="var(--surface-container-high)" stroke-dasharray="3,3" />
-              <line x1="0" y1="45" x2="300" y2="45" stroke="var(--surface-container-high)" stroke-dasharray="3,3" />
-              <line x1="0" y1="68" x2="300" y2="68" stroke="var(--surface-container-high)" stroke-dasharray="3,3" />
+          <!-- Rolling Sparkline Chart -->
+          <div class="chart-container">
+            <svg viewBox="0 0 300 80" width="100%" height="80" preserveAspectRatio="none">
+              <line x1="0" y1="20" x2="300" y2="20" stroke="var(--surface-container-high)" stroke-dasharray="3,3" />
+              <line x1="0" y1="40" x2="300" y2="40" stroke="var(--surface-container-high)" stroke-dasharray="3,3" />
+              <line x1="0" y1="60" x2="300" y2="60" stroke="var(--surface-container-high)" stroke-dasharray="3,3" />
               <polyline
                 :points="chartSvgPoints"
                 fill="none"
                 stroke="var(--primary)"
-                stroke-width="2"
+                stroke-width="2.2"
                 stroke-linecap="round"
                 stroke-linejoin="round"
               />
             </svg>
+          </div>
+
+          <!-- Docked 3-Metric Strip (Ping, Download, Upload) -->
+          <div class="metric-strip">
+            <div class="metric-strip-col">
+              <span class="metric-strip-label">Ping</span>
+              <span class="metric-strip-val">
+                {{ speedtestState.ping ? speedtestState.ping : '--' }}<span class="metric-strip-unit">ms</span>
+              </span>
+              <span class="metric-strip-sub">
+                {{ speedtestState.jitter ? '±' + speedtestState.jitter + ' ms' : 'Latency' }}
+              </span>
+            </div>
+            <div class="metric-strip-col">
+              <span class="metric-strip-label">Download</span>
+              <span class="metric-strip-val">
+                {{ speedtestState.download ? speedtestState.download : '--' }}<span class="metric-strip-unit">Mbps</span>
+              </span>
+              <span class="metric-strip-sub">
+                {{ speedtestState.bytesUsedMb ? speedtestState.bytesUsedMb.toFixed(1) + ' MB' : 'Payload' }}
+              </span>
+            </div>
+            <div class="metric-strip-col">
+              <span class="metric-strip-label">Upload</span>
+              <span class="metric-strip-val">
+                {{ speedtestState.upload ? speedtestState.upload : '--' }}<span class="metric-strip-unit">Mbps</span>
+              </span>
+              <span class="metric-strip-sub">
+                {{ speedtestState.phase === 'upload' ? 'Testing' : (speedtestState.upload ? 'Done' : 'Throughput') }}
+              </span>
+            </div>
           </div>
 
           <!-- Primary Action Button -->
@@ -116,37 +142,6 @@
           </button>
         </section>
 
-        <!-- Live Metrics 3-box Grid -->
-        <div class="metrics-grid-3">
-          <div class="metric-box">
-            <span class="metric-box-label">Ping / Jitter</span>
-            <span class="metric-box-val">
-              {{ speedtestState.ping ? speedtestState.ping + ' ms' : '--' }}
-            </span>
-            <span style="font-size: 10px; color: var(--on-surface-variant);">
-              {{ speedtestState.jitter ? '±' + speedtestState.jitter + ' ms' : 'latency' }}
-            </span>
-          </div>
-          <div class="metric-box">
-            <span class="metric-box-label">Download</span>
-            <span class="metric-box-val">
-              {{ speedtestState.download ? speedtestState.download + ' M' : '--' }}
-            </span>
-            <span style="font-size: 10px; color: var(--on-surface-variant);">
-              {{ speedtestState.bytesUsedMb ? speedtestState.bytesUsedMb.toFixed(1) + ' MB' : 'down' }}
-            </span>
-          </div>
-          <div class="metric-box">
-            <span class="metric-box-label">Upload</span>
-            <span class="metric-box-val">
-              {{ speedtestState.upload ? speedtestState.upload + ' M' : '--' }}
-            </span>
-            <span style="font-size: 10px; color: var(--on-surface-variant);">
-              upload
-            </span>
-          </div>
-        </div>
-
         <!-- Recent Results Card -->
         <section class="md3-card" v-if="speedHistory.length > 0">
           <div class="card-title-row">
@@ -156,120 +151,176 @@
             </span>
             <button class="btn btn-sm btn-secondary" @click="clearHistory">Clear</button>
           </div>
-          <div v-for="(h, idx) in speedHistory.slice(0, 4)" :key="idx" class="kv-row">
-            <div class="kv-label">
-              <span>{{ h.date }}</span>
-              <span style="color: var(--outline);">•</span>
-              <span style="font-size: 11px;">{{ h.server }}</span>
-            </div>
-            <div class="kv-value">
-              <span style="color: var(--primary);">↓ {{ h.download }}</span>
-              <span style="margin: 0 4px; color: var(--outline);">/</span>
-              <span style="color: var(--on-surface-variant);">↑ {{ h.upload }} Mbps</span>
-              <span style="margin-left: 6px; font-size: 10px; color: var(--on-surface-variant);">({{ h.ping }}ms)</span>
+          <div class="history-list">
+            <div v-for="(h, idx) in speedHistory.slice(0, 4)" :key="idx" class="history-card">
+              <div class="history-top">
+                <div class="history-speeds">
+                  <span class="speed-down">↓ {{ h.download }}</span>
+                  <span class="speed-slash">/</span>
+                  <span class="speed-up">↑ {{ h.upload }}</span>
+                  <span class="speed-unit">Mbps</span>
+                </div>
+                <span class="history-ping">{{ h.ping }} ms</span>
+              </div>
+              <div class="history-bottom">
+                <span>{{ h.date }}</span>
+                <span>•</span>
+                <span class="truncate-text">{{ h.server }}</span>
+              </div>
             </div>
           </div>
         </section>
       </div>
 
       <!-- 2. DIAGNOSTICS TAB -->
-      <div v-show="activeTab === 'diagnostics'" style="display: flex; flex-direction: column; gap: 10px;">
-        <!-- Live Real-Time Throughput Card -->
-        <section class="md3-card">
-          <div class="card-title-row">
-            <span class="card-title">
-              <Icons name="zap" :size="14" />
-              <span>Real-time interface rate</span>
-            </span>
-            <span class="badge-pill online">{{ telemetry.network.active_iface || 'Traffic' }}</span>
-          </div>
-          <div class="stat-grid-2x2">
-            <div class="stat-cell">
-              <span class="stat-cell-label">Current download</span>
-              <span class="stat-cell-val">{{ liveRate.rxRateStr }}</span>
+      <div v-show="activeTab === 'diagnostics'" style="display: flex; flex-direction: column; gap: 12px;">
+        <!-- Network Health Hero Card -->
+        <section class="health-hero-card">
+          <div class="health-top-row">
+            <div class="health-score-badge">
+              <span>{{ telemetry.health.score }}</span>
+              <span class="health-score-max">/ 100</span>
             </div>
-            <div class="stat-cell">
-              <span class="stat-cell-label">Current upload</span>
-              <span class="stat-cell-val">{{ liveRate.txRateStr }}</span>
+            <span class="health-grade-tag" :class="telemetry.health.grade">
+              {{ telemetry.health.grade }}
+            </span>
+          </div>
+
+          <div class="health-info-col">
+            <div class="health-summary">{{ telemetry.health.summary || 'Analyzing network...' }}</div>
+            <div class="health-recommendation">{{ telemetry.health.recommendation || 'Evaluating link quality...' }}</div>
+          </div>
+
+          <div class="hardware-strip">
+            <div class="hardware-col">
+              <span class="hw-label">Active route</span>
+              <span class="hw-val">{{ telemetry.network.active_iface || '--' }}</span>
+            </div>
+            <div class="hardware-col">
+              <span class="hw-label">Default gateway</span>
+              <span class="hw-val">{{ telemetry.network.gateway || '--' }}</span>
+            </div>
+            <div class="hardware-col">
+              <span class="hw-label">Local IP</span>
+              <span class="hw-val">{{ telemetry.network.local_ip || telemetry.wifi.ip || '--' }}</span>
             </div>
           </div>
         </section>
 
-        <!-- Wi-Fi Card (Header with Icon Badge + 2x2 Grid) -->
+        <!-- Live Network Throughput Card -->
         <section class="md3-card">
-          <div style="display: flex; align-items: center; justify-content: space-between;">
-            <div style="display: flex; align-items: center; gap: 10px;">
+          <div class="card-title-row">
+            <span class="card-title">
+              <Icons name="zap" :size="14" />
+              <span>Live network throughput</span>
+            </span>
+            <span class="badge-pill online">{{ telemetry.network.active_iface || 'Active' }}</span>
+          </div>
+          <div class="stat-grid-2x2">
+            <div class="stat-cell">
+              <span class="stat-cell-label">Live download</span>
+              <span class="stat-cell-val">{{ liveRate.rxRateStr }}</span>
+            </div>
+            <div class="stat-cell">
+              <span class="stat-cell-label">Live upload</span>
+              <span class="stat-cell-val">{{ liveRate.txRateStr }}</span>
+            </div>
+            <div class="stat-cell">
+              <span class="stat-cell-label">SoC platform</span>
+              <span class="stat-cell-val">{{ telemetry.device.platform || '--' }}</span>
+            </div>
+            <div class="stat-cell">
+              <span class="stat-cell-label">RAM capacity</span>
+              <span class="stat-cell-val">{{ telemetry.device.ram_total_mb ? telemetry.device.ram_total_mb + ' MB' : '--' }}</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Wi-Fi Link State Card -->
+        <section class="md3-card" v-if="telemetry.wifi.connected">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+            <div style="display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1;">
               <div class="icon-badge">
                 <Icons name="wifi" :size="18" />
               </div>
-              <div>
-                <div style="font-size: 13px; font-weight: 600; color: var(--on-bg);">
+              <div style="min-width: 0; flex: 1;">
+                <div style="font-size: 13px; font-weight: 600; color: var(--on-bg);" class="truncate-text">
                   {{ telemetry.wifi.ssid }}
                 </div>
-                <div style="font-size: 11px; color: var(--on-surface-variant);">
+                <div style="font-size: 11px; color: var(--on-surface-variant);" class="truncate-text">
                   {{ telemetry.wifi.standard }} • {{ telemetry.wifi.bssid }}
                 </div>
               </div>
             </div>
-            <span class="badge-pill" :class="telemetry.wifi.connected ? 'online' : 'offline'">
-              {{ telemetry.wifi.connected ? 'Connected' : 'Offline' }}
-            </span>
+            <span class="badge-pill online" style="flex-shrink: 0;">Connected</span>
           </div>
 
-          <div class="stat-grid-2x2" style="margin-top: 4px;">
+          <div class="stat-grid-2x2" style="margin-top: 2px;">
             <div class="stat-cell">
               <span class="stat-cell-label">Signal strength</span>
               <span class="stat-cell-val">{{ telemetry.wifi.rssi ? telemetry.wifi.rssi + ' dBm' : '--' }}</span>
             </div>
             <div class="stat-cell">
-              <span class="stat-cell-label">Link speed</span>
+              <span class="stat-cell-label">Link negotiation</span>
               <span class="stat-cell-val">{{ telemetry.wifi.link_speed_mbps ? telemetry.wifi.link_speed_mbps + ' Mbps' : '--' }}</span>
             </div>
             <div class="stat-cell">
-              <span class="stat-cell-label">Frequency / Band</span>
+              <span class="stat-cell-label">Frequency / Channel</span>
               <span class="stat-cell-val">{{ telemetry.wifi.frequency_mhz ? telemetry.wifi.frequency_mhz + ' MHz (' + telemetry.wifi.band + ')' : '--' }}</span>
             </div>
             <div class="stat-cell">
-              <span class="stat-cell-label">Gateway IP</span>
-              <span class="stat-cell-val">{{ telemetry.network.gateway || '--' }}</span>
+              <span class="stat-cell-label">Assigned IP</span>
+              <span class="stat-cell-val">{{ telemetry.wifi.ip || '--' }}</span>
             </div>
           </div>
         </section>
+        <div v-else class="offline-card">
+          <Icons name="wifi-off" :size="16" />
+          <span>Wi-Fi is currently inactive or disconnected</span>
+        </div>
 
-        <!-- Cellular Card (Header with Icon Badge + 2x2 Grid) -->
-        <section class="md3-card">
-          <div style="display: flex; align-items: center; justify-content: space-between;">
-            <div style="display: flex; align-items: center; gap: 10px;">
+        <!-- Cellular Link State Card -->
+        <section class="md3-card" v-if="telemetry.sim.slot0.inserted || telemetry.sim.slot1.inserted">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+            <div style="display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1;">
               <div class="icon-badge">
                 <Icons name="radio" :size="18" />
               </div>
-              <div>
-                <div style="font-size: 13px; font-weight: 600; color: var(--on-bg);">
-                  {{ telemetry.cellular.operator || 'No SIM detected' }}
+              <div style="min-width: 0; flex: 1;">
+                <div style="font-size: 13px; font-weight: 600; color: var(--on-bg);" class="truncate-text">
+                  {{ telemetry.cellular.operator || 'Cellular carrier' }}
                 </div>
-                <div style="font-size: 11px; color: var(--on-surface-variant);">
-                  {{ telemetry.cellular.network_type }} • {{ telemetry.cellular.cell_id > 0 ? 'CID ' + telemetry.cellular.cell_id : 'Cellular active' }}
+                <div style="font-size: 11px; color: var(--on-surface-variant);" class="truncate-text">
+                  {{ telemetry.cellular.network_type }} • {{ telemetry.cellular.cell_id > 0 ? 'CID ' + telemetry.cellular.cell_id : 'Registered' }}
                 </div>
               </div>
             </div>
-            <span class="badge-pill">SIM 1</span>
+            <span class="badge-pill" style="flex-shrink: 0;">SIM {{ telemetry.sim.active_slot + 1 }}</span>
           </div>
 
-          <div class="stat-grid-2x2" style="margin-top: 4px;">
+          <div class="stat-grid-2x2" style="margin-top: 2px;">
             <div class="stat-cell">
-              <span class="stat-cell-label">RSRP / RSRQ</span>
-              <span class="stat-cell-val">{{ telemetry.cellular.rsrp ? telemetry.cellular.rsrp + ' dBm' : '--' }} / {{ telemetry.cellular.rsrq ? telemetry.cellular.rsrq + ' dB' : '--' }}</span>
+              <span class="stat-cell-label">Signal (RSRP)</span>
+              <span class="stat-cell-val">{{ telemetry.cellular.rsrp ? telemetry.cellular.rsrp + ' dBm' : '--' }}</span>
             </div>
             <div class="stat-cell">
               <span class="stat-cell-label">Signal quality (SINR)</span>
               <span class="stat-cell-val">{{ telemetry.cellular.sinr ? telemetry.cellular.sinr + ' dB' : '--' }}</span>
             </div>
-            <div class="stat-cell" style="grid-column: span 2;">
-              <span class="stat-cell-label">Allowed network bitmask</span>
-              <span class="stat-cell-val" style="font-size: 11px;">{{ telemetry.cellular.allowed_types || 'Default carrier mode' }}</span>
+            <div class="stat-cell">
+              <span class="stat-cell-label">Generation</span>
+              <span class="stat-cell-val">{{ telemetry.cellular.network_type || '--' }}</span>
+            </div>
+            <div class="stat-cell">
+              <span class="stat-cell-label">Cell tower ID</span>
+              <span class="stat-cell-val">{{ telemetry.cellular.cell_id > 0 ? telemetry.cellular.cell_id : '--' }}</span>
             </div>
           </div>
         </section>
+        <div v-else class="offline-card">
+          <Icons name="alert" :size="16" />
+          <span>No cellular SIM card detected in device</span>
+        </div>
 
         <!-- DNS Benchmark Tool Card -->
         <section class="md3-card">
@@ -278,14 +329,23 @@
               <Icons name="globe" :size="14" />
               <span>DNS latency comparison</span>
             </span>
-            <button class="btn btn-sm btn-secondary" :disabled="dnsBenchmarking" @click="runDnsBenchmark">
-              <Icons name="refresh" :size="11" :class="{ 'spin-anim': dnsBenchmarking }" />
-              <span>{{ dnsBenchmarking ? 'Testing...' : 'Benchmark' }}</span>
-            </button>
+            <div style="display: flex; gap: 6px;">
+              <button
+                v-if="dnsResults.length > 0 && fastestDns"
+                class="btn btn-sm btn-primary"
+                @click="applyFastestDns"
+              >
+                <span>Apply {{ fastestDns.name }}</span>
+              </button>
+              <button class="btn btn-sm btn-secondary" :disabled="dnsBenchmarking" @click="runDnsBenchmark">
+                <Icons name="refresh" :size="11" :class="{ 'spin-anim': dnsBenchmarking }" />
+                <span>{{ dnsBenchmarking ? 'Testing...' : 'Benchmark' }}</span>
+              </button>
+            </div>
           </div>
           <div v-if="dnsResults.length > 0" class="dns-grid-2col" style="margin-top: 2px;">
             <div v-for="d in dnsResults" :key="d.name" class="dns-chip">
-              <span style="color: var(--on-surface-variant);">{{ d.name }}</span>
+              <span style="color: var(--on-surface-variant);" class="truncate-text">{{ d.name }}</span>
               <span style="font-weight: 600; font-variant-numeric: tabular-nums;" :style="{ color: d.latency_ms > 0 && d.latency_ms < 25 ? 'var(--primary)' : 'var(--on-bg)' }">
                 {{ d.latency_ms > 0 ? d.latency_ms.toFixed(1) + ' ms' : 'Timeout' }}
               </span>
@@ -298,21 +358,83 @@
       </div>
 
       <!-- 3. CELLULAR TAB -->
-      <div v-show="activeTab === 'cellular'" style="display: flex; flex-direction: column; gap: 10px;">
+      <div v-show="activeTab === 'cellular'" style="display: flex; flex-direction: column; gap: 12px;">
+        <!-- Multi-SIM Selector Strip -->
+        <div v-if="telemetry.sim.slot0.inserted || telemetry.sim.slot1.inserted" class="sim-selector-strip">
+          <button
+            class="sim-selector-btn"
+            :class="{ active: selectedSimSlot === 0, disabled: !telemetry.sim.slot0.inserted }"
+            :disabled="!telemetry.sim.slot0.inserted"
+            @click="selectedSimSlot = 0"
+          >
+            <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+              <Icons name="radio" :size="12" />
+              <span class="truncate-text">SIM 1: {{ telemetry.sim.slot0.operator || (telemetry.sim.slot0.inserted ? 'Active' : 'Empty') }}</span>
+            </div>
+            <span v-if="telemetry.sim.active_slot === 0" class="sim-data-badge">Data</span>
+          </button>
+          <button
+            class="sim-selector-btn"
+            :class="{ active: selectedSimSlot === 1, disabled: !telemetry.sim.slot1.inserted }"
+            :disabled="!telemetry.sim.slot1.inserted"
+            @click="selectedSimSlot = 1"
+          >
+            <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
+              <Icons name="radio" :size="12" />
+              <span class="truncate-text">SIM 2: {{ telemetry.sim.slot1.operator || (telemetry.sim.slot1.inserted ? 'Active' : 'Empty') }}</span>
+            </div>
+            <span v-if="telemetry.sim.active_slot === 1" class="sim-data-badge">Data</span>
+          </button>
+        </div>
+
+        <!-- Live Radio State Card -->
+        <section class="md3-card">
+          <div class="card-title-row">
+            <div style="display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1;">
+              <Icons name="radio" :size="14" />
+              <span class="card-title truncate-text">{{ (selectedSimSlot === 0 ? telemetry.sim.slot0.operator : telemetry.sim.slot1.operator) || telemetry.cellular.operator || 'Cellular radio' }}</span>
+            </div>
+            <span class="badge-pill active">{{ telemetry.cellular.network_type || 'Active' }}</span>
+          </div>
+
+          <div class="metric-strip" style="margin-top: 2px;">
+            <div class="metric-strip-col">
+              <span class="metric-strip-label">RSRP</span>
+              <span class="metric-strip-val">{{ telemetry.cellular.rsrp ? telemetry.cellular.rsrp : '--' }}<span class="metric-strip-unit">dBm</span></span>
+              <span class="metric-strip-sub">Signal</span>
+            </div>
+            <div class="metric-strip-col">
+              <span class="metric-strip-label">SINR</span>
+              <span class="metric-strip-val">{{ telemetry.cellular.sinr ? telemetry.cellular.sinr : '--' }}<span class="metric-strip-unit">dB</span></span>
+              <span class="metric-strip-sub">Quality</span>
+            </div>
+            <div class="metric-strip-col">
+              <span class="metric-strip-label">Tower</span>
+              <span class="metric-strip-val">{{ telemetry.cellular.cell_id > 0 ? telemetry.cellular.cell_id : '--' }}</span>
+              <span class="metric-strip-sub">Cell ID</span>
+            </div>
+          </div>
+
+          <button class="btn btn-secondary btn-block" @click="confirmRadioRefresh" style="margin-top: 2px;">
+            <Icons name="refresh" :size="13" />
+            <span>Refresh tower attachment</span>
+          </button>
+        </section>
+
+        <!-- Band & Mode Locker Card -->
         <section class="md3-card">
           <div class="card-title-row">
             <span class="card-title">
-              <Icons name="radio" :size="14" />
-              <span>Cellular band & mode locker</span>
+              <Icons name="sliders" :size="14" />
+              <span>Cellular band &amp; mode locker</span>
             </span>
-            <span class="badge-pill">Slot 0 (SIM 1)</span>
+            <span class="badge-pill">SIM {{ selectedSimSlot + 1 }}</span>
           </div>
-          <p style="font-size: 11px; color: var(--on-surface-variant); line-height: 1.35;">
-            Lock radio hardware strictly to specific cellular generations to prevent unwanted network drops.
+          <p style="font-size: 11px; color: var(--on-surface-variant); line-height: 1.4;">
+            Lock modem hardware to specific cellular generations to prevent unwanted network drops.
           </p>
 
-          <!-- 2-Column Mode Grid -->
-          <div class="mode-grid-2col" style="margin-top: 4px;">
+          <div class="mode-grid-2col" style="margin-top: 2px;">
             <div
               v-for="mode in cellularModes"
               :key="mode.id"
@@ -322,35 +444,76 @@
             >
               <div class="mode-card-top">
                 <span class="mode-card-title">{{ mode.title }}</span>
-                <Icons v-if="selectedCellularMode === mode.id" name="check" :size="13" style="color: var(--primary);" />
+                <Icons v-if="selectedCellularMode === mode.id" name="check" :size="13" style="color: var(--primary); flex-shrink: 0;" />
               </div>
               <span class="mode-card-sub">{{ mode.desc }}</span>
             </div>
-          </div>
-
-          <!-- Integrated Tower Refresh Action -->
-          <div style="border-top: 1px solid var(--surface-container-high); padding-top: 10px; margin-top: 6px;">
-            <button class="btn btn-secondary btn-block" @click="confirmRadioRefresh">
-              <Icons name="refresh" :size="13" />
-              <span>Refresh cellular tower attachment</span>
-            </button>
           </div>
         </section>
       </div>
 
       <!-- 4. OPTIMIZER TAB -->
-      <div v-show="activeTab === 'optimizer'" style="display: flex; flex-direction: column; gap: 10px;">
-        <!-- Card 1: Kernel TCP Optimization -->
+      <div v-show="activeTab === 'optimizer'" style="display: flex; flex-direction: column; gap: 12px;">
+        <!-- Intelligent Auto-Tuner Card -->
+        <section class="md3-card">
+          <div class="card-title-row">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <div class="icon-badge">
+                <Icons name="zap" :size="16" />
+              </div>
+              <div>
+                <div class="card-title">Intelligent auto-tuning</div>
+                <div style="font-size: 11px; color: var(--on-surface-variant);">
+                  Hardware-tailored network stack &amp; DNS calibration
+                </div>
+              </div>
+            </div>
+            <span class="badge-pill active">{{ telemetry.device.ram_tier || 'standard' }} tier</span>
+          </div>
+
+          <p style="font-size: 11.5px; color: var(--on-surface-variant); line-height: 1.45;">
+            Analyzes phone hardware profile, benchmarks DNS latency, and tunes kernel TCP parameters for peak network performance.
+          </p>
+
+          <div class="hardware-strip">
+            <div class="hardware-col">
+              <span class="hw-label">Device</span>
+              <span class="hw-val truncate-text">{{ telemetry.device.brand }} {{ telemetry.device.model }}</span>
+            </div>
+            <div class="hardware-col">
+              <span class="hw-label">SoC platform</span>
+              <span class="hw-val truncate-text">{{ telemetry.device.platform || 'Universal' }}</span>
+            </div>
+            <div class="hardware-col">
+              <span class="hw-label">RAM capacity</span>
+              <span class="hw-val truncate-text">{{ telemetry.device.ram_total_mb }} MB</span>
+            </div>
+          </div>
+
+          <button class="btn btn-primary btn-block" :disabled="isOptimizing" @click="runSmartOptimize">
+            <Icons name="sliders" :size="14" :class="{ 'spin-anim': isOptimizing }" />
+            <span>{{ isOptimizing ? 'Calibrating network stack...' : 'Auto-tune network stack' }}</span>
+          </button>
+
+          <div v-if="smartOptResult" class="tune-result-box">
+            <Icons name="check" :size="13" style="color: var(--primary); flex-shrink: 0;" />
+            <span>
+              Calibrated with {{ smartOptResult.tcp_cc }} CC, {{ smartOptResult.buffer_profile }} buffers, and {{ smartOptResult.best_dns }} resolver ({{ smartOptResult.best_dns_latency_ms }} ms).
+            </span>
+          </div>
+        </section>
+
+        <!-- Kernel TCP Tuning Card -->
         <section class="md3-card">
           <div class="card-title-row">
             <span class="card-title">
-              <Icons name="zap" :size="14" />
+              <Icons name="sliders" :size="14" />
               <span>Kernel TCP tuning</span>
             </span>
             <span class="badge-pill active">{{ telemetry.tcp.current_cc }}</span>
           </div>
 
-          <!-- TCP Algorithm Selector -->
+          <!-- TCP Algorithm -->
           <div style="display: flex; flex-direction: column; gap: 4px;">
             <span style="font-size: 11px; color: var(--on-surface-variant);">Congestion control algorithm</span>
             <div class="segmented-control">
@@ -366,11 +529,11 @@
             </div>
           </div>
 
-          <!-- Buffer Profiles Selector -->
+          <!-- Buffer Profiles -->
           <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 4px;">
             <div style="display: flex; justify-content: space-between; align-items: center;">
               <span style="font-size: 11px; color: var(--on-surface-variant);">Memory buffer profile</span>
-              <span style="font-size: 10px; color: var(--primary);">{{ activeBufferProfile }}</span>
+              <span style="font-size: 10.5px; color: var(--primary); font-weight: 500;">{{ activeBufferProfile }}</span>
             </div>
             <div class="segmented-control">
               <button
@@ -400,87 +563,115 @@
             </span>
           </div>
 
-          <!-- TCP Fast Open Toggle -->
+          <!-- TFO Switch with Authentic MD3 Switch -->
           <div class="switch-row" style="margin-top: 4px;">
             <div class="switch-label-col">
               <span class="switch-title">TCP Fast Open (TFO)</span>
               <span class="switch-desc">Eliminates handshake round-trips for repeat sessions</span>
             </div>
-            <label class="toggle-switch">
+            <label class="md3-switch">
               <input
                 type="checkbox"
                 :checked="telemetry.tcp.fastopen > 0"
                 @change="toggleTweak('fast_open', telemetry.tcp.fastopen > 0 ? 0 : 1)"
               />
-              <span class="toggle-slider"></span>
+              <span class="md3-switch-track">
+                <span class="md3-switch-thumb"></span>
+              </span>
             </label>
           </div>
         </section>
 
-        <!-- Card 2: DNS & System Handover -->
+        <!-- DNS & Network Handover Card -->
         <section class="md3-card">
           <div class="card-title-row">
             <span class="card-title">
               <Icons name="globe" :size="14" />
-              <span>DNS & network handover</span>
+              <span>DNS &amp; network handover</span>
             </span>
             <span class="badge-pill">{{ telemetry.settings.private_dns_mode }}</span>
           </div>
 
-          <!-- Private DNS 2-column list -->
-          <div class="dns-grid-2col" style="margin-top: 2px;">
+          <!-- System Default DNS Row -->
+          <div style="display: flex; flex-direction: column; gap: 6px; margin-top: 2px;">
+            <span style="font-size: 11px; color: var(--on-surface-variant);">Private DNS resolver</span>
+            
             <div
-              v-for="dns in dnsOptions"
-              :key="dns.id"
-              class="dns-chip"
-              style="cursor: pointer;"
-              :style="{ borderColor: selectedDns === dns.id ? 'var(--outline)' : 'var(--surface-container-high)' }"
-              @click="applyPrivateDns(dns)"
+              class="dns-option-row"
+              :class="{ selected: selectedDns === 'off' }"
+              @click="applyPrivateDns(dnsOptions[0])"
             >
               <div>
-                <div style="font-weight: 500; color: var(--on-bg);">{{ dns.name }}</div>
-                <div style="font-size: 10px; color: var(--on-surface-variant);">{{ dns.host || 'Default' }}</div>
+                <div style="font-size: 12px; font-weight: 600; color: var(--on-bg);">System default</div>
+                <div style="font-size: 10.5px; color: var(--on-surface-variant);">Standard carrier / Wi-Fi resolver</div>
               </div>
-              <Icons v-if="selectedDns === dns.id" name="check" :size="13" style="color: var(--primary);" />
+              <Icons v-if="selectedDns === 'off'" name="check" :size="13" style="color: var(--primary);" />
+            </div>
+
+            <!-- 2x2 Grid for Encrypted Providers -->
+            <div class="dns-grid-2col">
+              <div
+                v-for="dns in dnsOptions.slice(1)"
+                :key="dns.id"
+                class="dns-chip"
+                :class="{ selected: selectedDns === dns.id }"
+                @click="applyPrivateDns(dns)"
+              >
+                <div style="min-width: 0; flex: 1;">
+                  <div style="font-weight: 600; color: var(--on-bg);" class="truncate-text">{{ dns.name }}</div>
+                  <div style="font-size: 10px; color: var(--on-surface-variant);" class="truncate-text">{{ dns.host }}</div>
+                </div>
+                <Icons v-if="selectedDns === dns.id" name="check" :size="13" style="color: var(--primary); flex-shrink: 0; margin-left: 4px;" />
+              </div>
             </div>
           </div>
 
-          <!-- Wi-Fi Scan Throttling -->
-          <div class="switch-row" style="margin-top: 4px;">
+          <!-- Wi-Fi Scan Throttling Switch -->
+          <div class="switch-row" style="margin-top: 6px;">
             <div class="switch-label-col">
               <span class="switch-title">Wi-Fi scan throttling</span>
               <span class="switch-desc">Turn off to accelerate roaming between access points</span>
             </div>
-            <label class="toggle-switch">
+            <label class="md3-switch">
               <input
                 type="checkbox"
                 v-model="telemetry.settings.wifi_scan_throttle"
                 @change="toggleTweak('wifi_throttle', telemetry.settings.wifi_scan_throttle)"
               />
-              <span class="toggle-slider"></span>
+              <span class="md3-switch-track">
+                <span class="md3-switch-thumb"></span>
+              </span>
             </label>
           </div>
 
-          <!-- Mobile Data Always On -->
+          <!-- Mobile Data Always On Switch -->
           <div class="switch-row">
             <div class="switch-label-col">
               <span class="switch-title">Mobile data always active</span>
               <span class="switch-desc">Keep cellular warm while on Wi-Fi for zero-lag handovers</span>
             </div>
-            <label class="toggle-switch">
+            <label class="md3-switch">
               <input
                 type="checkbox"
                 v-model="telemetry.settings.mobile_data_always_on"
                 @change="toggleTweak('mobile_data_always', telemetry.settings.mobile_data_always_on)"
               />
-              <span class="toggle-slider"></span>
+              <span class="md3-switch-track">
+                <span class="md3-switch-thumb"></span>
+              </span>
             </label>
           </div>
+
+          <!-- Restore Defaults Button -->
+          <button class="btn btn-secondary btn-block" @click="restoreDefaults" style="margin-top: 4px;">
+            <Icons name="refresh" :size="13" />
+            <span>Restore kernel defaults</span>
+          </button>
         </section>
       </div>
 
       <!-- 5. CONSOLE TAB -->
-      <div v-show="activeTab === 'console'" style="display: flex; flex-direction: column; gap: 10px;">
+      <div v-show="activeTab === 'console'" style="display: flex; flex-direction: column; gap: 12px;">
         <section class="md3-card">
           <div class="card-title-row">
             <span class="card-title">
@@ -495,6 +686,7 @@
             <button class="btn btn-sm btn-secondary" @click="runConsoleCmd('speedtest')">Speedtest</button>
             <button class="btn btn-sm btn-secondary" @click="runConsoleCmd('ping')">Ping 1.1.1.1</button>
             <button class="btn btn-sm btn-secondary" @click="runConsoleCmd('dns_bench')">DNS bench</button>
+            <button class="btn btn-sm btn-secondary" @click="runConsoleCmd('auto_tune')">Auto-tune</button>
           </div>
           <div class="console-box" style="margin-top: 8px;">
             {{ consoleOutput || 'Console ready. Execute diagnostic commands above.' }}
@@ -503,7 +695,7 @@
       </div>
     </main>
 
-    <!-- In-App Modal Dialog (Mounted synchronously with v-if, zero transition backdrop) -->
+    <!-- In-App Modal Dialog -->
     <div v-if="modalState.visible" class="modal-overlay" @click.self="modalState.visible = false">
       <div class="modal-dialog">
         <div class="modal-title">{{ modalState.title }}</div>
@@ -545,6 +737,21 @@ function showToast(msg) {
 
 /* Telemetry State */
 const telemetry = reactive({
+  device: {
+    brand: '',
+    model: '',
+    platform: '',
+    android_ver: '',
+    api_level: 0,
+    ram_total_mb: 0,
+    ram_tier: 'standard'
+  },
+  sim: {
+    active_slot: 0,
+    active_subid: 1,
+    slot0: { inserted: false, state: '', operator: '' },
+    slot1: { inserted: false, state: '', operator: '' }
+  },
   wifi: {
     enabled: true,
     connected: false,
@@ -569,7 +776,14 @@ const telemetry = reactive({
   },
   network: {
     gateway: '',
-    active_iface: ''
+    active_iface: '',
+    local_ip: ''
+  },
+  health: {
+    score: 80,
+    grade: 'good',
+    summary: 'Evaluating network link...',
+    recommendation: 'Stable connection detected'
   },
   tcp: {
     current_cc: 'cubic',
@@ -583,6 +797,10 @@ const telemetry = reactive({
     mobile_data_always_on: false
   }
 })
+
+const selectedSimSlot = ref(0)
+const isOptimizing = ref(false)
+const smartOptResult = ref(null)
 
 const availableTcpCc = computed(() => {
   return (telemetry.tcp.available_cc || 'cubic reno').split(' ').filter(Boolean)
@@ -645,9 +863,17 @@ async function refreshTelemetry(userTriggered = false) {
   try {
     const data = await runBridgeJson('info')
     if (data) {
+      if (data.device) Object.assign(telemetry.device, data.device)
+      if (data.sim) {
+        Object.assign(telemetry.sim, data.sim)
+        if (data.sim.active_slot !== undefined && !userTriggered) {
+          selectedSimSlot.value = data.sim.active_slot
+        }
+      }
       if (data.wifi) Object.assign(telemetry.wifi, data.wifi)
       if (data.cellular) Object.assign(telemetry.cellular, data.cellular)
       if (data.network) Object.assign(telemetry.network, data.network)
+      if (data.health) Object.assign(telemetry.health, data.health)
       if (data.tcp) Object.assign(telemetry.tcp, data.tcp)
       if (data.settings) Object.assign(telemetry.settings, data.settings)
     }
@@ -814,12 +1040,31 @@ const selectedCellularMode = ref('auto')
 
 async function applyCellularMode(modeId) {
   selectedCellularMode.value = modeId
-  const res = await runBridgeJson('set_mode', 0, modeId)
+  const res = await runBridgeJson('set_mode', selectedSimSlot.value, modeId)
   if (res && res.success) {
-    showToast(`Locked mode to ${modeId}`)
+    showToast(`Locked SIM ${selectedSimSlot.value + 1} to ${modeId}`)
     refreshTelemetry()
   } else {
     showToast('Failed to apply network mode')
+  }
+}
+
+/* Intelligent Auto-Tuner */
+async function runSmartOptimize() {
+  isOptimizing.value = true
+  try {
+    const res = await runBridgeJson('smart_optimize')
+    if (res && res.success) {
+      smartOptResult.value = res
+      await refreshTelemetry()
+      showToast(`Optimized: ${res.tcp_cc} CC & ${res.best_dns} DNS`)
+    } else {
+      showToast('Optimization failed')
+    }
+  } catch (e) {
+    showToast('Optimization error')
+  } finally {
+    isOptimizing.value = false
   }
 }
 
@@ -874,15 +1119,15 @@ async function applyPrivateDns(option) {
   }
 }
 
-/* System Tweaks */
-async function toggleTweak(name, val) {
-  await runBridgeJson('set_tweak', name, val ? 1 : 0)
-  showToast('Setting updated')
-}
-
 /* DNS Benchmark */
 const dnsBenchmarking = ref(false)
 const dnsResults = ref([])
+
+const fastestDns = computed(() => {
+  if (!dnsResults.value || dnsResults.value.length === 0) return null
+  const valid = dnsResults.value.filter(d => d.latency_ms > 0)
+  return valid.length > 0 ? valid[0] : null
+})
 
 async function runDnsBenchmark() {
   dnsBenchmarking.value = true
@@ -897,6 +1142,34 @@ async function runDnsBenchmark() {
   } finally {
     dnsBenchmarking.value = false
   }
+}
+
+async function applyFastestDns() {
+  if (!fastestDns.value) return
+  const matched = dnsOptions.find(o => o.name.toLowerCase() === fastestDns.value.name.toLowerCase())
+  if (matched) {
+    await applyPrivateDns(matched)
+  }
+}
+
+/* System Tweaks */
+async function toggleTweak(name, val) {
+  await runBridgeJson('set_tweak', name, val ? 1 : 0)
+  showToast('Setting updated')
+}
+
+/* Restore Kernel Defaults */
+async function restoreDefaults() {
+  await runBridgeJson('set_tcp_profile', 'stock')
+  await runBridgeJson('set_tcp_cc', 'cubic')
+  await runBridgeJson('set_dns', 'off', '')
+  await runBridgeJson('set_tweak', 'fast_open', 1)
+  await runBridgeJson('set_tweak', 'wifi_throttle', 1)
+  await runBridgeJson('set_tweak', 'mobile_data_always', 0)
+  activeBufferProfile.value = 'stock'
+  smartOptResult.value = null
+  await refreshTelemetry()
+  showToast('Restored default network configuration')
 }
 
 /* Modal Dialog State */
@@ -939,6 +1212,8 @@ async function runConsoleCmd(cmdType) {
     out = await runBridge('ping', '1.1.1.1', '3')
   } else if (cmdType === 'dns_bench') {
     out = await runBridge('dns_bench')
+  } else if (cmdType === 'auto_tune') {
+    out = await runBridge('smart_optimize')
   }
   consoleOutput.value += (out || 'Command finished with empty output.') + '\n'
 }
