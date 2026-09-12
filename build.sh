@@ -139,16 +139,17 @@ echo "=========================================="
 if [ "$DEPLOY" = "true" ]; then
     echo "deploying to live device modules (/data/adb/modules/hypernet)..."
     su -c "
-        pkill -9 -f libhypernet.so 2>/dev/null || true
+        pkill -9 -x libhypernet.so 2>/dev/null || true
         MOD_TARGET=\"/data/adb/modules/hypernet\"
         mkdir -p \"\$MOD_TARGET/system/bin\" \"\$MOD_TARGET/webroot\"
         cp -f \"$PROJECT_DIR/module.prop\" \"\$MOD_TARGET/\"
+        cp -f \"$PROJECT_DIR/customize.sh\" \"\$MOD_TARGET/\"
         cp -f \"$PROJECT_DIR/service.sh\" \"\$MOD_TARGET/\"
         cp -f \"$PROJECT_DIR/uninstall.sh\" \"\$MOD_TARGET/\"
         cp -f \"$PROJECT_DIR/system/bin/libhypernet.so\" \"\$MOD_TARGET/system/bin/\"
         cp -f \"$PROJECT_DIR/webroot/index.html\" \"\$MOD_TARGET/webroot/\"
         chmod 755 \"\$MOD_TARGET/service.sh\" \"\$MOD_TARGET/uninstall.sh\" \"\$MOD_TARGET/system/bin/libhypernet.so\"
-        chmod 644 \"\$MOD_TARGET/module.prop\" \"\$MOD_TARGET/webroot/index.html\"
+        chmod 644 \"\$MOD_TARGET/module.prop\" \"\$MOD_TARGET/customize.sh\" \"\$MOD_TARGET/webroot/index.html\"
         chcon -R u:object_r:system_file:s0 \"\$MOD_TARGET\" 2>/dev/null || true
         echo 'deployment completed'
     "
