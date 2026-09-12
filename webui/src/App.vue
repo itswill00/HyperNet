@@ -582,6 +582,48 @@
           </div>
         </section>
 
+        <!-- Anti-Censorship & DPI Bypass Card -->
+        <section class="md3-card">
+          <div class="card-title-row">
+            <span class="card-title">
+              <Icons name="shield" :size="14" />
+              <span>Anti-censorship &amp; DPI bypass</span>
+            </span>
+            <span class="badge-pill" :class="telemetry.settings.dpi_bypass ? 'active' : ''">
+              {{ telemetry.settings.dpi_bypass ? 'Bypassing' : 'Disabled' }}
+            </span>
+          </div>
+
+          <div class="switch-row" style="margin-top: 2px;">
+            <div class="switch-label-col">
+              <span class="switch-title">Bypass Internet Positif &amp; DPI</span>
+              <span class="switch-desc">Splits TLS ClientHello across TCP segments (MSS 160) to bypass ISP SNI filtering (Reddit, Vimeo) without VPN</span>
+            </div>
+            <label class="md3-switch">
+              <input
+                type="checkbox"
+                :checked="telemetry.settings.dpi_bypass"
+                :disabled="isTogglingDpi"
+                @change="toggleDpiBypass"
+              />
+              <span class="md3-switch-track">
+                <span class="md3-switch-thumb"></span>
+              </span>
+            </label>
+          </div>
+
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--outline-variant);">
+            <div style="font-size: 11px; color: var(--on-surface-variant); min-width: 0; flex: 1;" class="truncate-text">
+              <span v-if="siteCheckStatus">{{ siteCheckStatus }}</span>
+              <span v-else>Verify access to blocked websites</span>
+            </div>
+            <button class="btn btn-secondary" style="padding: 4px 10px; font-size: 11px; flex-shrink: 0;" :disabled="isCheckingSite" @click="checkBlockedSite">
+              <Icons name="refresh" :size="11" :class="{ 'spin-anim': isCheckingSite }" />
+              <span>{{ isCheckingSite ? 'Probing...' : 'Test Reddit' }}</span>
+            </button>
+          </div>
+        </section>
+
         <!-- DNS & Network Handover Card -->
         <section class="md3-card">
           <div class="card-title-row">
@@ -806,7 +848,8 @@ const telemetry = reactive({
     private_dns_mode: 'off',
     private_dns_specifier: '',
     wifi_scan_throttle: true,
-    mobile_data_always_on: false
+    mobile_data_always_on: false,
+    dpi_bypass: false
   }
 })
 
@@ -941,10 +984,10 @@ async function refreshTelemetry(userTriggered = false) {
 const engine = new SpeedTestEngine()
 
 const servers = [
-  { id: 'cf', name: 'Cloudflare Anycast', host: 'speed.cloudflare.com', url: 'https://speed.cloudflare.com' },
-  { id: 'cf_stream', name: 'Cloudflare Streaming', host: 'speed.cloudflare.com', url: 'https://speed.cloudflare.com' },
+  { id: 'cf_anycast', name: 'Cloudflare Anycast', host: 'speed.cloudflare.com', url: 'https://speed.cloudflare.com' },
+  { id: 'cf_stream', name: 'Cloudflare Streaming Edge', host: 'speed.cloudflare.com', url: 'https://speed.cloudflare.com' },
   { id: 'cf_latency', name: 'Cloudflare Low-Latency', host: 'speed.cloudflare.com', url: 'https://speed.cloudflare.com' },
-  { id: 'tele2', name: 'Tele2 Edge Global', host: 'speedtest.tele2.net', url: 'http://speedtest.tele2.net' }
+  { id: 'cf_enterprise', name: 'Cloudflare Enterprise Edge', host: 'speed.cloudflare.com', url: 'https://speed.cloudflare.com' }
 ]
 const selectedServer = ref(servers[0])
 
@@ -1060,7 +1103,7 @@ async function toggleSpeedtest() {
       serverUrl: selectedServer.value.url,
       serverName: selectedServer.value.name,
       serverId: selectedServer.value.id,
-      durationSec: 6
+      durationSec: 4
     }, (progress) => {
       if (!speedtestState.isTesting) return
       speedtestState.phase = progress.phase
@@ -1217,6 +1260,49 @@ async function applyFastestDns() {
   const matched = dnsOptions.find(o => o.name.toLowerCase() === fastestDns.value.name.toLowerCase())
   if (matched) {
     await applyPrivateDns(matched)
+  }
+}
+
+/* Anti-Censorship & DPI Bypass */
+const isTogglingDpi = ref(false)
+const isCheckingSite = ref(false)
+const siteCheckStatus = ref('')
+
+async function toggleDpiBypass(e) {
+  const enable = e.target.checked
+  isTogglingDpi.value = true
+  try {
+    await runBridge('set_dpi_bypass', enable ? '1' : '0')
+    telemetry.settings.dpi_bypass = enable
+    showToast(enable ? 'Anti-Censorship DPI bypass activated' : 'DPI bypass deactivated')
+    await refreshTelemetry()
+  } catch (err) {
+    showToast('Failed to toggle DPI bypass')
+  } finally {
+    isTogglingDpi.value = false
+  }
+}
+
+async function checkBlockedSite() {
+  isCheckingSite.value = true
+  siteCheckStatus.value = 'Probing www.reddit.com...'
+  try {
+    const res = await runBridgeJson('check_site', 'www.reddit.com')
+    if (res && res.reachable) {
+      siteCheckStatus.value = `Accessible (${res.ip || 'OK'})`
+      showToast('Success: Reddit is accessible!')
+    } else if (res && res.reason === 'dns_poisoned') {
+      siteCheckStatus.value = `DNS poisoned (${res.ip})`
+      showToast('Blocked: DNS was poisoned by ISP')
+    } else {
+      siteCheckStatus.value = res?.reason || 'Connection refused'
+      showToast('Site unreachable, enable DPI Bypass')
+    }
+  } catch (e) {
+    siteCheckStatus.value = 'Probe failed'
+    showToast('Verification failed')
+  } finally {
+    isCheckingSite.value = false
   }
 }
 

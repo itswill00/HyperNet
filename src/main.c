@@ -704,12 +704,14 @@ static int cmd_info(void) {
     read_cmd_line("settings get global private_dns_specifier 2>/dev/null", dns_specifier, sizeof(dns_specifier));
     read_cmd_line("settings get global wifi_scan_throttle_enabled 2>/dev/null", wifi_throttle, sizeof(wifi_throttle));
     read_cmd_line("settings get global mobile_data_always_on 2>/dev/null", mobile_data_always, sizeof(mobile_data_always));
+    int dpi_active = (system("iptables -t mangle -C POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 160 >/dev/null 2>&1") == 0);
 
     printf("\"settings\":{");
     printf("\"private_dns_mode\":"); json_print_escaped(dns_mode); printf(",");
     printf("\"private_dns_specifier\":"); json_print_escaped(dns_specifier); printf(",");
     printf("\"wifi_scan_throttle\":%s,", strcmp(wifi_throttle, "1") == 0 ? "true" : "false");
-    printf("\"mobile_data_always_on\":%s", strcmp(mobile_data_always, "1") == 0 ? "true" : "false");
+    printf("\"mobile_data_always_on\":%s,", strcmp(mobile_data_always, "1") == 0 ? "true" : "false");
+    printf("\"dpi_bypass\":%s", dpi_active ? "true" : "false");
     printf("}}\n");
 
     return 0;
@@ -1007,6 +1009,80 @@ static int cmd_radio_refresh(void) {
     return 0;
 }
 
+/* Anti-Censorship & DPI Bypass: TCP MSS packet fragmentation & DoT */
+static int cmd_set_dpi_bypass(int enable) {
+    if (enable) {
+        system("iptables -t mangle -C POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 160 >/dev/null 2>&1 || iptables -t mangle -I POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 160 >/dev/null 2>&1");
+        system("ip6tables -t mangle -C POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 160 >/dev/null 2>&1 || ip6tables -t mangle -I POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 160 >/dev/null 2>&1");
+
+        /* If private DNS is off, automatically enable Cloudflare Anti-Censorship DNS */
+        char curr_dns[64] = "";
+        read_cmd_line("settings get global private_dns_mode 2>/dev/null", curr_dns, sizeof(curr_dns));
+        if (strcmp(curr_dns, "off") == 0 || strlen(curr_dns) == 0) {
+            internal_set_dns("hostname", "1dot1dot1dot1.cloudflare-dns.com");
+        }
+
+        system("mkdir -p /data/adb/modules/hypernet 2>/dev/null; echo '1' > /data/adb/modules/hypernet/dpi_bypass.conf; mkdir -p /data/adb/hypernet 2>/dev/null; echo '1' > /data/adb/hypernet/dpi_bypass.conf");
+        printf("{\"success\":true,\"dpi_bypass\":true}\n");
+    } else {
+        system("iptables -t mangle -D POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 160 >/dev/null 2>&1");
+        system("ip6tables -t mangle -D POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 160 >/dev/null 2>&1");
+        system("mkdir -p /data/adb/modules/hypernet 2>/dev/null; echo '0' > /data/adb/modules/hypernet/dpi_bypass.conf; mkdir -p /data/adb/hypernet 2>/dev/null; echo '0' > /data/adb/hypernet/dpi_bypass.conf");
+        printf("{\"success\":true,\"dpi_bypass\":false}\n");
+    }
+    return 0;
+}
+
+/* Check Site Reachability (Pure POSIX socket probe for blocked domains like www.reddit.com) */
+static int cmd_check_site(const char *domain) {
+    if (!domain || !is_safe_input(domain)) {
+        printf("{\"error\":\"invalid_domain\"}\n");
+        return 1;
+    }
+    struct addrinfo hints, *res;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(domain, "443", &hints, &res) != 0) {
+        printf("{\"domain\":\"%s\",\"reachable\":false,\"reason\":\"dns_lookup_failed\"}\n", domain);
+        return 0;
+    }
+
+    struct sockaddr_in *sin = (struct sockaddr_in *)res->ai_addr;
+    char ip_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &(sin->sin_addr), ip_str, INET_ADDRSTRLEN);
+
+    /* Check for known Indonesian ISP block landing IPs (TrustPositif / Internet Baik) */
+    if (strncmp(ip_str, "127.", 4) == 0 || strcmp(ip_str, "0.0.0.0") == 0 ||
+        strncmp(ip_str, "180.250.", 8) == 0 || strncmp(ip_str, "118.98.", 7) == 0) {
+        freeaddrinfo(res);
+        printf("{\"domain\":\"%s\",\"ip\":\"%s\",\"reachable\":false,\"reason\":\"dns_poisoned\"}\n", domain, ip_str);
+        return 0;
+    }
+
+    int s = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (s < 0) {
+        freeaddrinfo(res);
+        printf("{\"domain\":\"%s\",\"reachable\":false,\"reason\":\"socket_creation_failed\"}\n", domain);
+        return 0;
+    }
+
+    struct timeval tv = { .tv_sec = 3, .tv_usec = 0 };
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    int conn = connect(s, res->ai_addr, res->ai_addrlen);
+    close(s);
+    freeaddrinfo(res);
+
+    if (conn == 0) {
+        printf("{\"domain\":\"%s\",\"ip\":\"%s\",\"reachable\":true,\"status\":\"accessible\"}\n", domain, ip_str);
+    } else {
+        printf("{\"domain\":\"%s\",\"reachable\":false,\"reason\":\"connection_refused\"}\n", domain);
+    }
+    return 0;
+}
+
 /* Intelligent Auto-Tuner tailored to hardware specs and network health */
 static int cmd_smart_optimize(void) {
     char ram_tier[32] = "standard";
@@ -1151,6 +1227,15 @@ static int cmd_apply_boot(void) {
         }
         fclose(f);
     }
+
+    /* 3. Restore DPI bypass if enabled */
+    char dpi_cfg[16] = "";
+    read_cmd_line("cat /data/adb/modules/hypernet/dpi_bypass.conf 2>/dev/null || cat /data/adb/hypernet/dpi_bypass.conf 2>/dev/null", dpi_cfg, sizeof(dpi_cfg));
+    if (strcmp(dpi_cfg, "1") == 0) {
+        system("iptables -t mangle -C POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 160 >/dev/null 2>&1 || iptables -t mangle -I POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 160 >/dev/null 2>&1");
+        system("ip6tables -t mangle -C POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 160 >/dev/null 2>&1 || ip6tables -t mangle -I POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 160 >/dev/null 2>&1");
+    }
+
     return 0;
 }
 
@@ -1313,6 +1398,8 @@ static void print_usage(void) {
     printf("  set_tcp_profile <prof>  apply buffer profile (gaming|throughput|stock)\n");
     printf("  set_dns <mode> [host]   configure android private dns\n");
     printf("  set_tweak <name> <val>  toggle tweaks (wifi_throttle|mobile_data_always|fast_open)\n");
+    printf("  set_dpi_bypass <0|1>    toggle anti-censorship DPI bypass (TCP MSS packet fragmentation)\n");
+    printf("  check_site [domain]     probe web access reachability (default: www.reddit.com)\n");
     printf("  radio_refresh           toggle airplane mode to refresh cell tower attachment\n");
     printf("  smart_optimize          intelligent hardware-tailored network & dns auto-tuning\n");
     printf("  apply_boot              reapply saved network configurations on boot\n");
@@ -1375,6 +1462,12 @@ int main(int argc, char *argv[]) {
             return 1;
         }
         return cmd_set_tweak(argv[2], atoi(argv[3]));
+    } else if (strcmp(cmd, "set_dpi_bypass") == 0) {
+        int enable = argc > 2 ? atoi(argv[2]) : 1;
+        return cmd_set_dpi_bypass(enable);
+    } else if (strcmp(cmd, "check_site") == 0) {
+        const char *dom = argc > 2 ? argv[2] : "www.reddit.com";
+        return cmd_check_site(dom);
     } else if (strcmp(cmd, "radio_refresh") == 0) {
         return cmd_radio_refresh();
     } else if (strcmp(cmd, "smart_optimize") == 0) {
