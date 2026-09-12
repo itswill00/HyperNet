@@ -9,9 +9,9 @@
         </div>
       </div>
       <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
-        <span class="badge-pill" :class="isOnline ? 'online' : 'offline'" style="max-width: 140px;">
-          <Icons :name="isOnline ? (telemetry.wifi.connected ? 'wifi' : 'radio') : 'wifi-off'" :size="11" />
-          <span class="truncate-text">{{ isOnline ? (telemetry.wifi.connected ? 'Wi-Fi' : (telemetry.cellular.operator || 'Cellular')) : 'Offline' }}</span>
+        <span class="badge-pill" :class="isOnline ? 'online' : 'offline'" style="max-width: 150px;">
+          <Icons :name="activeConnectionIcon" :size="11" />
+          <span class="truncate-text">{{ activeConnectionLabel }}</span>
         </span>
         <span class="badge-pill" style="cursor: pointer; user-select: none;" @click="refreshTelemetry(true)" title="Tap to refresh">
           <Icons name="refresh" :size="11" :class="{ 'spin-anim': isRefreshing }" />
@@ -55,8 +55,8 @@
           <!-- Top Row: Route & Server selector -->
           <div class="hero-top-row">
             <div class="hero-iface-badge">
-              <Icons :name="telemetry.wifi.connected ? 'wifi' : 'radio'" :size="11" />
-              <span class="truncate-text">{{ telemetry.network.active_iface ? `${telemetry.network.active_iface} (${telemetry.network.local_ip || telemetry.wifi.ip || 'online'})` : 'Auto interface' }}</span>
+              <Icons :name="isWifiActive ? 'wifi' : 'radio'" :size="11" />
+              <span class="truncate-text">{{ activeRouteSummary }}</span>
             </div>
             <div class="hero-server-badge" @click="toggleServerSelect" title="Click to switch server">
               <Icons name="server" :size="11" />
@@ -237,7 +237,7 @@
         </section>
 
         <!-- Wi-Fi Link State Card -->
-        <section class="md3-card" v-if="telemetry.wifi.connected">
+        <section class="md3-card" v-if="isWifiActive || telemetry.wifi.connected">
           <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
             <div style="display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1;">
               <div class="icon-badge">
@@ -245,10 +245,10 @@
               </div>
               <div style="min-width: 0; flex: 1;">
                 <div style="font-size: 13px; font-weight: 600; color: var(--on-bg);" class="truncate-text">
-                  {{ telemetry.wifi.ssid }}
+                  {{ (telemetry.wifi.ssid && telemetry.wifi.ssid !== 'unknown') ? telemetry.wifi.ssid : 'Wi-Fi network' }}
                 </div>
                 <div style="font-size: 11px; color: var(--on-surface-variant);" class="truncate-text">
-                  {{ telemetry.wifi.standard }} • {{ telemetry.wifi.bssid }}
+                  {{ telemetry.wifi.standard !== 'unknown' ? telemetry.wifi.standard : 'Active link' }} • {{ (telemetry.wifi.bssid && telemetry.wifi.bssid !== 'unknown') ? telemetry.wifi.bssid : (telemetry.wifi.ip || telemetry.network.local_ip || 'Connected') }}
                 </div>
               </div>
             </div>
@@ -270,7 +270,7 @@
             </div>
             <div class="stat-cell">
               <span class="stat-cell-label">Assigned IP</span>
-              <span class="stat-cell-val">{{ telemetry.wifi.ip || '--' }}</span>
+              <span class="stat-cell-val">{{ telemetry.wifi.ip || telemetry.network.local_ip || '--' }}</span>
             </div>
           </div>
         </section>
@@ -722,7 +722,19 @@ import { SpeedTestEngine } from './helpers/speedtest.js'
 import { runBridge, runBridgeJson, execCommand } from './helpers/shell.js'
 
 const activeTab = ref('speed')
-const isOnline = ref(navigator.onLine)
+const browserOnline = ref(navigator.onLine)
+if (typeof window !== 'undefined') {
+  window.addEventListener('online', () => { browserOnline.value = true })
+  window.addEventListener('offline', () => { browserOnline.value = false })
+}
+
+const isOnline = computed(() => {
+  if (telemetry.wifi.connected || (telemetry.wifi.ip && telemetry.wifi.ip.length > 5)) return true
+  if (telemetry.network.active_iface && telemetry.network.active_iface.length > 0) return true
+  if (telemetry.cellular.operator && telemetry.cellular.operator.length > 0 && telemetry.cellular.network_type !== 'unknown') return true
+  return browserOnline.value
+})
+
 const isRefreshing = ref(false)
 const toastMsg = ref('')
 let toastTimer = null
@@ -755,7 +767,7 @@ const telemetry = reactive({
   wifi: {
     enabled: true,
     connected: false,
-    ssid: 'Scanning...',
+    ssid: '',
     bssid: 'unknown',
     ip: '',
     rssi: 0,
@@ -765,7 +777,7 @@ const telemetry = reactive({
     standard: 'unknown'
   },
   cellular: {
-    operator: 'Cellular',
+    operator: '',
     network_type: 'unknown',
     rsrp: 0,
     rsrq: 0,
@@ -801,6 +813,46 @@ const telemetry = reactive({
 const selectedSimSlot = ref(0)
 const isOptimizing = ref(false)
 const smartOptResult = ref(null)
+
+const isWifiActive = computed(() => {
+  if (telemetry.network.active_iface && telemetry.network.active_iface.startsWith('wlan')) {
+    return true
+  }
+  if (telemetry.wifi.connected) {
+    return true
+  }
+  if (telemetry.wifi.ip && telemetry.wifi.ip.length > 6) {
+    return true
+  }
+  return false
+})
+
+const activeConnectionLabel = computed(() => {
+  if (!isOnline.value) return 'Offline'
+  if (isWifiActive.value) {
+    const ssid = telemetry.wifi.ssid
+    if (ssid && ssid !== 'unknown' && ssid !== 'Scanning...') {
+      return ssid
+    }
+    return 'Wi-Fi'
+  }
+  return telemetry.cellular.operator || 'Cellular'
+})
+
+const activeConnectionIcon = computed(() => {
+  if (!isOnline.value) return 'wifi-off'
+  if (isWifiActive.value) return 'wifi'
+  return 'radio'
+})
+
+const activeRouteSummary = computed(() => {
+  const iface = telemetry.network.active_iface
+  const ip = telemetry.network.local_ip || telemetry.wifi.ip
+  if (iface) {
+    return ip ? `${iface} (${ip})` : iface
+  }
+  return isWifiActive.value ? 'Wi-Fi (wlan0)' : 'Cellular route'
+})
 
 const availableTcpCc = computed(() => {
   return (telemetry.tcp.available_cc || 'cubic reno').split(' ').filter(Boolean)
@@ -889,15 +941,28 @@ async function refreshTelemetry(userTriggered = false) {
 const engine = new SpeedTestEngine()
 
 const servers = [
-  { id: 'cf', name: 'Cloudflare Anycast', url: 'https://speed.cloudflare.com' },
-  { id: 'tele2', name: 'Tele2 Edge', url: 'https://speed.cloudflare.com' }
+  { id: 'cf', name: 'Cloudflare Anycast', host: 'speed.cloudflare.com', url: 'https://speed.cloudflare.com' },
+  { id: 'cf_stream', name: 'Cloudflare Streaming', host: 'speed.cloudflare.com', url: 'https://speed.cloudflare.com' },
+  { id: 'cf_latency', name: 'Cloudflare Low-Latency', host: 'speed.cloudflare.com', url: 'https://speed.cloudflare.com' },
+  { id: 'tele2', name: 'Tele2 Edge Global', host: 'speedtest.tele2.net', url: 'http://speedtest.tele2.net' }
 ]
 const selectedServer = ref(servers[0])
 
 function toggleServerSelect() {
+  if (speedtestState.isTesting) {
+    engine.abort()
+    speedtestState.isTesting = false
+  }
   const currentIdx = servers.findIndex(s => s.id === selectedServer.value.id)
   const nextIdx = (currentIdx + 1) % servers.length
   selectedServer.value = servers[nextIdx]
+  speedtestState.instantSpeed = 0
+  speedtestState.download = 0
+  speedtestState.upload = 0
+  speedtestState.ping = 0
+  speedtestState.phase = 'idle'
+  speedtestState.progressPct = 0
+  speedtestState.graphPoints = []
   showToast(`Switched server to ${selectedServer.value.name}`)
 }
 
@@ -974,6 +1039,7 @@ async function toggleSpeedtest() {
     engine.abort()
     speedtestState.isTesting = false
     speedtestState.phase = 'idle'
+    speedtestState.instantSpeed = 0
     showToast('Speedtest cancelled')
     return
   }
@@ -993,8 +1059,10 @@ async function toggleSpeedtest() {
     const res = await engine.runTest({
       serverUrl: selectedServer.value.url,
       serverName: selectedServer.value.name,
-      durationSec: 9
+      serverId: selectedServer.value.id,
+      durationSec: 6
     }, (progress) => {
+      if (!speedtestState.isTesting) return
       speedtestState.phase = progress.phase
       speedtestState.progressPct = progress.progressPct || 0
       speedtestState.instantSpeed = progress.speedMbps || 0
@@ -1006,7 +1074,7 @@ async function toggleSpeedtest() {
       if (progress.graphPoints) speedtestState.graphPoints = progress.graphPoints
     })
 
-    if (res) {
+    if (res && speedtestState.isTesting) {
       speedtestState.lastTestedAt = Date.now()
       saveHistory({
         date: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -1221,6 +1289,7 @@ async function runConsoleCmd(cmdType) {
 onMounted(() => {
   loadHistory()
   refreshTelemetry()
+  setTimeout(refreshTelemetry, 500)
   pollTraffic()
   trafficInterval = setInterval(pollTraffic, 1500)
 })

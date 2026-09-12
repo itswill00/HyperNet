@@ -46,12 +46,12 @@ export function execCommand(cmd, timeoutMs = 45000) {
 }
 
 export function getBridgeBinary() {
-  return `if [ -x /data/adb/modules/hypernet/system/bin/libhypernet.so ]; then /data/adb/modules/hypernet/system/bin/libhypernet.so; elif [ -x /data/adb/modules_update/hypernet/system/bin/libhypernet.so ]; then /data/adb/modules_update/hypernet/system/bin/libhypernet.so; elif [ -x /system/bin/libhypernet.so ]; then /system/bin/libhypernet.so; elif [ -x /data/data/com.termux/files/home/HyperNet_Module/system/bin/libhypernet.so ]; then /data/data/com.termux/files/home/HyperNet_Module/system/bin/libhypernet.so; else echo '{"error":"bridge_binary_not_found"}'; fi`
+  return `if [ -x /data/adb/modules/hypernet/system/bin/libhypernet.so ]; then echo /data/adb/modules/hypernet/system/bin/libhypernet.so; elif [ -x /data/adb/modules_update/hypernet/system/bin/libhypernet.so ]; then echo /data/adb/modules_update/hypernet/system/bin/libhypernet.so; elif [ -x /system/bin/libhypernet.so ]; then echo /system/bin/libhypernet.so; elif [ -x /data/data/com.termux/files/home/HyperNet_Module/system/bin/libhypernet.so ]; then echo /data/data/com.termux/files/home/HyperNet_Module/system/bin/libhypernet.so; else echo ""; fi`
 }
 
 export async function runBridge(action, ...args) {
   const safeArgs = args.map(a => "'" + String(a).replace(/'/g, "'\\''") + "'").join(' ')
-  const cmd = `BIN="$(${getBridgeBinary})"; if [ "$BIN" != '{"error":"bridge_binary_not_found"}' ]; then $BIN ${action} ${safeArgs}; else echo "$BIN"; fi`
+  const cmd = `for bin in /data/adb/modules/hypernet/system/bin/libhypernet.so /data/adb/modules_update/hypernet/system/bin/libhypernet.so /system/bin/libhypernet.so /data/data/com.termux/files/home/HyperNet_Module/system/bin/libhypernet.so; do if [ -x "$bin" ]; then exec "$bin" ${action} ${safeArgs}; fi; done; echo '{"error":"bridge_binary_not_found"}'`
   try {
     const raw = await execCommand(cmd, 30000)
     return raw.trim()

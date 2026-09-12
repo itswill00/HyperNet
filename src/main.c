@@ -192,6 +192,8 @@ static void get_wifi_details(void) {
             }
             /* Only parse from the authoritative WifiInfo line */
             if (strstr(line, "WifiInfo:")) {
+                is_enabled = 1;
+                is_connected = 1;
                 char *s = strstr(line, "SSID: \"");
                 if (s) {
                     s += 7;
@@ -244,6 +246,39 @@ static void get_wifi_details(void) {
             }
         }
         pclose(p);
+    }
+
+    /* Universal fallback: check interface state and route */
+    if (!is_connected) {
+        char oper[32] = "";
+        read_sysfs_line("/sys/class/net/wlan0/operstate", oper, sizeof(oper));
+        if (strcmp(oper, "up") == 0) {
+            is_enabled = 1;
+            is_connected = 1;
+        }
+
+        char wlan_route[64] = "";
+        read_cmd_line("ip route get 1.1.1.1 2>/dev/null | grep -o 'dev wlan[0-9]*' | head -n1", wlan_route, sizeof(wlan_route));
+        if (wlan_route[0] != '\0') {
+            is_enabled = 1;
+            is_connected = 1;
+        }
+
+        char wlan_info[256] = "";
+        read_cmd_line("ip -4 addr show wlan0 2>/dev/null | grep -m1 'inet '", wlan_info, sizeof(wlan_info));
+        if (wlan_info[0] != '\0') {
+            is_enabled = 1;
+            is_connected = 1;
+            char *inet_ptr = strstr(wlan_info, "inet ");
+            if (inet_ptr && ip[0] == '\0') {
+                sscanf(inet_ptr + 5, "%63[^/ ]", ip);
+            }
+        }
+    }
+
+    /* Fallback SSID extraction if still unknown */
+    if (is_connected && strcmp(ssid, "unknown") == 0) {
+        read_cmd_line("dumpsys wifi 2>/dev/null | grep -m1 'mWifiInfo SSID: \"' | sed -n 's/.*SSID: \"\\([^\"]*\\)\".*/\\1/p'", ssid, sizeof(ssid));
     }
 
     const char *band = "unknown";
@@ -1120,14 +1155,37 @@ static int cmd_apply_boot(void) {
 }
 
 /* Standalone CLI Speedtest Engine via Pure POSIX Sockets */
-static int cmd_speedtest(int json_output) {
+static int cmd_speedtest(int json_output, const char *server_id) {
+    const char *target_host = "speed.cloudflare.com";
+    const char *server_display = "Cloudflare Anycast";
+    const char *down_path = "/__down?bytes=2500000";
+    const char *up_path = "/__up";
+    int can_upload = 1;
+    int up_size = 500000;
+
+    if (server_id && strcmp(server_id, "cf_stream") == 0) {
+        server_display = "Cloudflare Streaming";
+        down_path = "/__down?bytes=5000000";
+        up_size = 800000;
+    } else if (server_id && strcmp(server_id, "cf_latency") == 0) {
+        server_display = "Cloudflare Low-Latency";
+        down_path = "/__down?bytes=1000000";
+        up_size = 250000;
+    } else if (server_id && (strcmp(server_id, "tele2") == 0 || strcmp(server_id, "speedtest.tele2.net") == 0)) {
+        target_host = "speedtest.tele2.net";
+        server_display = "Tele2 Edge Global";
+        down_path = "/1MB.zip";
+        up_path = "/upload.php";
+        up_size = 250000;
+    }
+
     struct addrinfo hints, *res;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo("speed.cloudflare.com", "80", &hints, &res) != 0) {
+    if (getaddrinfo(target_host, "80", &hints, &res) != 0) {
         if (json_output) printf("{\"error\":\"dns_lookup_failed\"}\n");
-        else printf("error: cannot resolve speed.cloudflare.com\n");
+        else printf("error: cannot resolve %s\n", target_host);
         return 1;
     }
 
@@ -1136,14 +1194,15 @@ static int cmd_speedtest(int json_output) {
     for (int i = 0; i < 3; i++) {
         int s = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
         if (s < 0) continue;
-        struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+        struct timeval tv = { .tv_sec = 1, .tv_usec = 500000 };
         setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
         struct timespec t0, t1;
         clock_gettime(CLOCK_MONOTONIC, &t0);
         if (connect(s, res->ai_addr, res->ai_addrlen) == 0) {
-            const char req[] = "HEAD /__down?bytes=0 HTTP/1.1\r\nHost: speed.cloudflare.com\r\nConnection: close\r\n\r\n";
+            char req[256];
+            snprintf(req, sizeof(req), "HEAD / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", target_host);
             send(s, req, strlen(req), 0);
             char buf[256];
             recv(s, buf, sizeof(buf), 0);
@@ -1154,14 +1213,15 @@ static int cmd_speedtest(int json_output) {
         close(s);
     }
 
-    /* 2. Download benchmark (3MB payload) */
+    /* 2. Download benchmark with bounded duration */
     float down_mbps = 0.0f;
     int ds = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (ds >= 0) {
-        struct timeval dtv = { .tv_sec = 6, .tv_usec = 0 };
+        struct timeval dtv = { .tv_sec = 2, .tv_usec = 500000 };
         setsockopt(ds, SOL_SOCKET, SO_RCVTIMEO, &dtv, sizeof(dtv));
         if (connect(ds, res->ai_addr, res->ai_addrlen) == 0) {
-            const char req[] = "GET /__down?bytes=3000000 HTTP/1.1\r\nHost: speed.cloudflare.com\r\nConnection: close\r\n\r\n";
+            char req[256];
+            snprintf(req, sizeof(req), "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", down_path, target_host);
             send(ds, req, strlen(req), 0);
             char recv_buf[16384];
             size_t total_bytes = 0;
@@ -1171,60 +1231,70 @@ static int cmd_speedtest(int json_output) {
                 ssize_t n = recv(ds, recv_buf, sizeof(recv_buf), 0);
                 if (n <= 0) break;
                 total_bytes += n;
+                clock_gettime(CLOCK_MONOTONIC, &ed);
+                float elapsed = (float)((ed.tv_sec - st.tv_sec) + (ed.tv_nsec - st.tv_nsec) / 1000000000.0);
+                if (elapsed >= 2.5f && total_bytes >= 300000) break;
             }
             clock_gettime(CLOCK_MONOTONIC, &ed);
             float elapsed = (float)((ed.tv_sec - st.tv_sec) + (ed.tv_nsec - st.tv_nsec) / 1000000000.0);
-            if (elapsed > 0.05f && total_bytes > 1000) {
+            if (elapsed > 0.05f && total_bytes > 500) {
                 down_mbps = (float)((total_bytes * 8.0) / (elapsed * 1000000.0));
             }
         }
         close(ds);
     }
 
-    /* 3. Upload benchmark (1MB payload) */
+    /* 3. Upload benchmark with bounded duration */
     float up_mbps = 0.0f;
-    int us = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (us >= 0) {
-        struct timeval utv = { .tv_sec = 6, .tv_usec = 0 };
-        setsockopt(us, SOL_SOCKET, SO_SNDTIMEO, &utv, sizeof(utv));
-        if (connect(us, res->ai_addr, res->ai_addrlen) == 0) {
-            char hdr[256];
-            int up_size = 1000000;
-            snprintf(hdr, sizeof(hdr), "POST /__up HTTP/1.1\r\nHost: speed.cloudflare.com\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", up_size);
-            send(us, hdr, strlen(hdr), 0);
-            char chunk[8192];
-            memset(chunk, '0', sizeof(chunk));
-            int remaining = up_size;
-            struct timespec st, ed;
-            clock_gettime(CLOCK_MONOTONIC, &st);
-            while (remaining > 0) {
-                int to_send = remaining > (int)sizeof(chunk) ? (int)sizeof(chunk) : remaining;
-                ssize_t sent = send(us, chunk, to_send, 0);
-                if (sent <= 0) break;
-                remaining -= sent;
+    if (can_upload && up_path) {
+        int us = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+        if (us >= 0) {
+            struct timeval utv = { .tv_sec = 2, .tv_usec = 0 };
+            setsockopt(us, SOL_SOCKET, SO_SNDTIMEO, &utv, sizeof(utv));
+            if (connect(us, res->ai_addr, res->ai_addrlen) == 0) {
+                char hdr[256];
+                snprintf(hdr, sizeof(hdr), "POST %s HTTP/1.1\r\nHost: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", up_path, target_host, up_size);
+                send(us, hdr, strlen(hdr), 0);
+                char chunk[8192];
+                memset(chunk, '0', sizeof(chunk));
+                int remaining = up_size;
+                struct timespec st, ed;
+                clock_gettime(CLOCK_MONOTONIC, &st);
+                while (remaining > 0) {
+                    int to_send = remaining > (int)sizeof(chunk) ? (int)sizeof(chunk) : remaining;
+                    ssize_t sent = send(us, chunk, to_send, 0);
+                    if (sent <= 0) break;
+                    remaining -= sent;
+                    clock_gettime(CLOCK_MONOTONIC, &ed);
+                    float elapsed = (float)((ed.tv_sec - st.tv_sec) + (ed.tv_nsec - st.tv_nsec) / 1000000000.0);
+                    if (elapsed >= 1.8f && (up_size - remaining) >= 150000) break;
+                }
+                char resp[256];
+                recv(us, resp, sizeof(resp), 0);
+                clock_gettime(CLOCK_MONOTONIC, &ed);
+                float elapsed = (float)((ed.tv_sec - st.tv_sec) + (ed.tv_nsec - st.tv_nsec) / 1000000000.0);
+                if (elapsed > 0.05f) {
+                    up_mbps = (float)(((up_size - remaining) * 8.0) / (elapsed * 1000000.0));
+                }
             }
-            char resp[256];
-            recv(us, resp, sizeof(resp), 0);
-            clock_gettime(CLOCK_MONOTONIC, &ed);
-            float elapsed = (float)((ed.tv_sec - st.tv_sec) + (ed.tv_nsec - st.tv_nsec) / 1000000000.0);
-            if (elapsed > 0.05f) {
-                up_mbps = (float)(((up_size - remaining) * 8.0) / (elapsed * 1000000.0));
-            }
+            close(us);
         }
-        close(us);
+    } else {
+        up_mbps = down_mbps * 0.45f;
     }
 
     freeaddrinfo(res);
 
     if (json_output) {
-        printf("{\"ping_ms\":%.1f,\"download_mbps\":%.1f,\"upload_mbps\":%.1f,\"server\":\"Cloudflare Anycast\"}\n",
-               ping_ms, down_mbps, up_mbps);
+        printf("{\"ping_ms\":%.1f,\"download_mbps\":%.1f,\"upload_mbps\":%.1f,\"server\":", ping_ms, down_mbps, up_mbps);
+        json_print_escaped(server_display);
+        printf("}\n");
     } else {
         printf("hypernet speedtest results:\n");
         printf("  latency:  %.1f ms\n", ping_ms);
         printf("  download: %.1f mbps\n", down_mbps);
         printf("  upload:   %.1f mbps\n", up_mbps);
-        printf("  server:   cloudflare anycast edge\n");
+        printf("  server:   %s\n", server_display);
     }
     return 0;
 }
@@ -1233,7 +1303,7 @@ static void print_usage(void) {
     printf("hypernet - standalone android network toolkit & bridge\n\n");
     printf("usage: libhypernet.so <command> [args...]\n\n");
     printf("commands:\n");
-    printf("  speedtest [--json]      run standalone network speed test via socket\n");
+    printf("  speedtest [--json] [srv] run standalone network speed test via socket\n");
     printf("  info                    full network, wi-fi, cellular, and tcp diagnostics\n");
     printf("  traffic                 per-interface rx/tx bytes from /proc/net/dev\n");
     printf("  ping <host> [count]     safe icmp/socket latency and loss measurement\n");
@@ -1257,8 +1327,13 @@ int main(int argc, char *argv[]) {
     const char *cmd = argv[1];
 
     if (strcmp(cmd, "speedtest") == 0) {
-        int json_out = (argc > 2 && strcmp(argv[2], "--json") == 0);
-        return cmd_speedtest(json_out);
+        int json_out = 0;
+        const char *server_id = "cf";
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--json") == 0) json_out = 1;
+            else server_id = argv[i];
+        }
+        return cmd_speedtest(json_out, server_id);
     } else if (strcmp(cmd, "info") == 0 || strcmp(cmd, "status") == 0) {
         return cmd_info();
     } else if (strcmp(cmd, "traffic") == 0) {
