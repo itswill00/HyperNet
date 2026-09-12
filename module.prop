@@ -1,0 +1,7 @@
+id=hypernet
+name=HyperNet
+version=v1.0.0
+versionCode=1000
+author=@itswill00
+description=Standalone network telemetry, multi-engine speedtest, cellular band control, and TCP/IP optimizer with monochrome WebUI.
+updateJson=https://raw.githubusercontent.com/itswill00/HyperNet/main/update.json
