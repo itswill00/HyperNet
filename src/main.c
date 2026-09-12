@@ -704,7 +704,7 @@ static int cmd_info(void) {
     read_cmd_line("settings get global private_dns_specifier 2>/dev/null", dns_specifier, sizeof(dns_specifier));
     read_cmd_line("settings get global wifi_scan_throttle_enabled 2>/dev/null", wifi_throttle, sizeof(wifi_throttle));
     read_cmd_line("settings get global mobile_data_always_on 2>/dev/null", mobile_data_always, sizeof(mobile_data_always));
-    int dpi_active = (system("iptables -t mangle -C POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 160 >/dev/null 2>&1") == 0);
+    int dpi_active = (system("iptables -t mangle -C POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1") == 0);
 
     printf("\"settings\":{");
     printf("\"private_dns_mode\":"); json_print_escaped(dns_mode); printf(",");
@@ -1012,8 +1012,8 @@ static int cmd_radio_refresh(void) {
 /* Anti-Censorship & DPI Bypass: TCP MSS packet fragmentation & DoT */
 static int cmd_set_dpi_bypass(int enable) {
     if (enable) {
-        system("iptables -t mangle -C POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 160 >/dev/null 2>&1 || iptables -t mangle -I POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 160 >/dev/null 2>&1");
-        system("ip6tables -t mangle -C POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 160 >/dev/null 2>&1 || ip6tables -t mangle -I POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 160 >/dev/null 2>&1");
+        system("iptables -t mangle -C POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1 || iptables -t mangle -I POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1");
+        system("ip6tables -t mangle -C POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1 || ip6tables -t mangle -I POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1");
 
         /* If private DNS is off, automatically enable Cloudflare Anti-Censorship DNS */
         char curr_dns[64] = "";
@@ -1025,8 +1025,8 @@ static int cmd_set_dpi_bypass(int enable) {
         system("mkdir -p /data/adb/modules/hypernet 2>/dev/null; echo '1' > /data/adb/modules/hypernet/dpi_bypass.conf; mkdir -p /data/adb/hypernet 2>/dev/null; echo '1' > /data/adb/hypernet/dpi_bypass.conf");
         printf("{\"success\":true,\"dpi_bypass\":true}\n");
     } else {
-        system("iptables -t mangle -D POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 160 >/dev/null 2>&1");
-        system("ip6tables -t mangle -D POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 160 >/dev/null 2>&1");
+        system("iptables -t mangle -D POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1");
+        system("ip6tables -t mangle -D POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1");
         system("mkdir -p /data/adb/modules/hypernet 2>/dev/null; echo '0' > /data/adb/modules/hypernet/dpi_bypass.conf; mkdir -p /data/adb/hypernet 2>/dev/null; echo '0' > /data/adb/hypernet/dpi_bypass.conf");
         printf("{\"success\":true,\"dpi_bypass\":false}\n");
     }
@@ -1232,8 +1232,8 @@ static int cmd_apply_boot(void) {
     char dpi_cfg[16] = "";
     read_cmd_line("cat /data/adb/modules/hypernet/dpi_bypass.conf 2>/dev/null || cat /data/adb/hypernet/dpi_bypass.conf 2>/dev/null", dpi_cfg, sizeof(dpi_cfg));
     if (strcmp(dpi_cfg, "1") == 0) {
-        system("iptables -t mangle -C POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 160 >/dev/null 2>&1 || iptables -t mangle -I POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 160 >/dev/null 2>&1");
-        system("ip6tables -t mangle -C POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 160 >/dev/null 2>&1 || ip6tables -t mangle -I POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 160 >/dev/null 2>&1");
+        system("iptables -t mangle -C POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1 || iptables -t mangle -I POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1");
+        system("ip6tables -t mangle -C POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1 || ip6tables -t mangle -I POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1");
     }
 
     return 0;
