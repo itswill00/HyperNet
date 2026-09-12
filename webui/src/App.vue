@@ -207,22 +207,22 @@
           </div>
         </section>
 
-        <!-- Live Network Throughput Card -->
+        <!-- Network Throughput Card -->
         <section class="md3-card">
           <div class="card-title-row">
             <span class="card-title">
               <Icons name="zap" :size="14" />
-              <span>Live network throughput</span>
+              <span>Network throughput</span>
             </span>
             <span class="badge-pill online">{{ telemetry.network.active_iface || 'Active' }}</span>
           </div>
           <div class="stat-grid-2x2">
             <div class="stat-cell">
-              <span class="stat-cell-label">Live download</span>
+              <span class="stat-cell-label">Download rate</span>
               <span class="stat-cell-val">{{ liveRate.rxRateStr }}</span>
             </div>
             <div class="stat-cell">
-              <span class="stat-cell-label">Live upload</span>
+              <span class="stat-cell-label">Upload rate</span>
               <span class="stat-cell-val">{{ liveRate.txRateStr }}</span>
             </div>
             <div class="stat-cell">
@@ -231,7 +231,7 @@
             </div>
             <div class="stat-cell">
               <span class="stat-cell-label">RAM capacity</span>
-              <span class="stat-cell-val">{{ telemetry.device.ram_total_mb ? telemetry.device.ram_total_mb + ' MB' : '--' }}</span>
+              <span class="stat-cell-val">{{ formatRamInstalled(telemetry.device.ram_total_mb, telemetry.device.ram_installed_gb) }} GB</span>
             </div>
           </div>
         </section>
@@ -292,10 +292,16 @@
                 </div>
                 <div style="font-size: 11px; color: var(--on-surface-variant);" class="truncate-text">
                   {{ telemetry.cellular.network_type }} • {{ telemetry.cellular.cell_id > 0 ? 'CID ' + telemetry.cellular.cell_id : 'Registered' }}
+                  <span v-if="telemetry.cellular.band > 0"> (B{{ telemetry.cellular.band }})</span>
                 </div>
               </div>
             </div>
-            <span class="badge-pill" style="flex-shrink: 0;">SIM {{ telemetry.sim.active_slot + 1 }}</span>
+            <div style="display: flex; align-items: center; gap: 6px; flex-shrink: 0;">
+              <span class="badge-pill" :class="{ active: telemetry.cellular.data_enabled }">
+                {{ telemetry.cellular.data_enabled ? 'Data active' : 'Data off' }}
+              </span>
+              <span class="badge-pill">SIM {{ telemetry.sim.active_slot + 1 }}</span>
+            </div>
           </div>
 
           <div class="stat-grid-2x2" style="margin-top: 2px;">
@@ -387,35 +393,61 @@
           </button>
         </div>
 
-        <!-- Live Radio State Card -->
+        <!-- Radio State Card -->
         <section class="md3-card">
           <div class="card-title-row">
             <div style="display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1;">
               <Icons name="radio" :size="14" />
-              <span class="card-title truncate-text">{{ (selectedSimSlot === 0 ? telemetry.sim.slot0.operator : telemetry.sim.slot1.operator) || telemetry.cellular.operator || 'Cellular radio' }}</span>
+              <span class="card-title truncate-text">{{ activeSimInfo.operator || 'Cellular radio' }}</span>
             </div>
-            <span class="badge-pill active">{{ telemetry.cellular.network_type || 'Active' }}</span>
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <span class="badge-pill" :class="{ active: activeSimInfo.data_enabled }">
+                {{ activeSimInfo.data_enabled ? 'Data active' : 'Data off' }}
+              </span>
+              <span class="badge-pill active">{{ activeSimInfo.network_type || 'Active' }}</span>
+            </div>
           </div>
 
           <div class="metric-strip" style="margin-top: 2px;">
             <div class="metric-strip-col">
               <span class="metric-strip-label">RSRP</span>
-              <span class="metric-strip-val">{{ telemetry.cellular.rsrp ? telemetry.cellular.rsrp : '--' }}<span class="metric-strip-unit">dBm</span></span>
+              <span class="metric-strip-val">{{ activeSimInfo.rsrp ? activeSimInfo.rsrp : '--' }}<span class="metric-strip-unit">dBm</span></span>
               <span class="metric-strip-sub">Signal</span>
             </div>
             <div class="metric-strip-col">
               <span class="metric-strip-label">SINR</span>
-              <span class="metric-strip-val">{{ telemetry.cellular.sinr ? telemetry.cellular.sinr : '--' }}<span class="metric-strip-unit">dB</span></span>
+              <span class="metric-strip-val">{{ activeSimInfo.sinr ? activeSimInfo.sinr : '--' }}<span class="metric-strip-unit">dB</span></span>
               <span class="metric-strip-sub">Quality</span>
             </div>
             <div class="metric-strip-col">
               <span class="metric-strip-label">Tower</span>
-              <span class="metric-strip-val">{{ telemetry.cellular.cell_id > 0 ? telemetry.cellular.cell_id : '--' }}</span>
-              <span class="metric-strip-sub">Cell ID</span>
+              <span class="metric-strip-val">{{ activeSimInfo.cell_id > 0 ? activeSimInfo.cell_id : '--' }}</span>
+              <span class="metric-strip-sub">{{ activeSimInfo.band > 0 ? 'Band ' + activeSimInfo.band : 'Cell ID' }}</span>
             </div>
           </div>
 
-          <button class="btn btn-secondary btn-block" @click="confirmRadioRefresh" style="margin-top: 2px;">
+          <div class="stat-grid-2x2" style="margin-top: 4px;">
+            <div class="stat-cell">
+              <span class="stat-cell-label">Signal quality (RSRQ)</span>
+              <span class="stat-cell-val">{{ activeSimInfo.rsrq ? activeSimInfo.rsrq + ' dB' : '--' }}</span>
+            </div>
+            <div class="stat-cell">
+              <span class="stat-cell-label">Signal level</span>
+              <span class="stat-cell-val">{{ activeSimInfo.level ? activeSimInfo.level + ' / 4 bars' : '--' }}</span>
+            </div>
+            <div class="stat-cell">
+              <span class="stat-cell-label">Physical Cell ID (PCI)</span>
+              <span class="stat-cell-val">{{ activeSimInfo.pci > 0 ? activeSimInfo.pci : (activeSimInfo.cell_id > 0 ? activeSimInfo.cell_id : '--') }}</span>
+            </div>
+            <div class="stat-cell">
+              <span class="stat-cell-label">Link status</span>
+              <span class="stat-cell-val" style="text-transform: capitalize;">
+                {{ activeSimInfo.data_state === 'connected' ? 'Data connected' : (activeSimInfo.inserted ? 'Voice/SMS ready' : 'Absent') }}
+              </span>
+            </div>
+          </div>
+
+          <button class="btn btn-secondary btn-block" @click="confirmRadioRefresh" style="margin-top: 4px;">
             <Icons name="refresh" :size="13" />
             <span>Refresh tower attachment</span>
           </button>
@@ -426,12 +458,12 @@
           <div class="card-title-row">
             <span class="card-title">
               <Icons name="sliders" :size="14" />
-              <span>Cellular band &amp; mode locker</span>
+              <span>Preferred radio access mode</span>
             </span>
             <span class="badge-pill">SIM {{ selectedSimSlot + 1 }}</span>
           </div>
           <p style="font-size: 11px; color: var(--on-surface-variant); line-height: 1.4;">
-            Lock modem hardware to specific cellular generations to prevent unwanted network drops.
+            Lock the cellular radio to preferred network technologies to maintain consistent reception.
           </p>
 
           <div class="mode-grid-2col" style="margin-top: 2px;">
@@ -462,7 +494,7 @@
               <span>Hardware stack auto-tuning</span>
             </span>
             <span class="badge-pill active">
-              {{ Math.round((telemetry.device.ram_total_mb || 4096) / 1024) }} GB RAM
+              {{ formatRamInstalled(telemetry.device.ram_total_mb, telemetry.device.ram_installed_gb) }} GB RAM
             </span>
           </div>
 
@@ -470,30 +502,34 @@
             Optimized for {{ telemetry.device.brand || 'Device' }} {{ telemetry.device.model }} • {{ (telemetry.device.platform || 'universal').toUpperCase() }}
           </div>
 
-          <div class="hardware-strip">
-            <div class="hardware-col">
-              <span class="hw-label">Hardware profile</span>
-              <span class="hw-val truncate-text">{{ telemetry.device.brand }} {{ telemetry.device.model }}</span>
+          <div class="stat-grid-2x2" style="margin-top: 4px;">
+            <div class="stat-cell">
+              <span class="stat-cell-label">Hardware model</span>
+              <span class="stat-cell-val truncate-text">{{ telemetry.device.brand }} {{ telemetry.device.model }}</span>
             </div>
-            <div class="hardware-col">
-              <span class="hw-label">SoC platform</span>
-              <span class="hw-val truncate-text">{{ (telemetry.device.platform || 'Universal').toUpperCase() }}</span>
+            <div class="stat-cell">
+              <span class="stat-cell-label">SoC platform</span>
+              <span class="stat-cell-val truncate-text">{{ (telemetry.device.platform || 'Universal').toUpperCase() }}</span>
             </div>
-            <div class="hardware-col">
-              <span class="hw-label">RAM profile</span>
-              <span class="hw-val truncate-text">{{ (telemetry.device.ram_tier || 'Balanced').toUpperCase() }} ({{ Math.round((telemetry.device.ram_total_mb || 0) / 1024) }} GB)</span>
+            <div class="stat-cell">
+              <span class="stat-cell-label">RAM profile</span>
+              <span class="stat-cell-val truncate-text">{{ formatRamTier(telemetry.device.ram_tier) }}</span>
+            </div>
+            <div class="stat-cell">
+              <span class="stat-cell-label">Installed memory</span>
+              <span class="stat-cell-val truncate-text">{{ formatRamInstalled(telemetry.device.ram_total_mb, telemetry.device.ram_installed_gb) }} GB</span>
             </div>
           </div>
 
           <button class="btn btn-primary btn-block" :disabled="isOptimizing" @click="runSmartOptimize">
             <Icons name="sliders" :size="14" :class="{ 'spin-anim': isOptimizing }" />
-            <span>{{ isOptimizing ? 'Calibrating network stack...' : 'Auto-tune network stack' }}</span>
+            <span>{{ isOptimizing ? 'Calibrating network stack...' : 'Optimize network configuration' }}</span>
           </button>
 
           <div v-if="smartOptResult" class="tune-result-box">
             <Icons name="check" :size="13" style="color: var(--primary); flex-shrink: 0;" />
             <span>
-              Calibrated with {{ smartOptResult.tcp_cc }} CC, {{ smartOptResult.buffer_profile }} buffers, and {{ smartOptResult.best_dns }} resolver ({{ smartOptResult.best_dns_latency_ms }} ms).
+              Configured with {{ smartOptResult.tcp_cc }} CC, {{ smartOptResult.buffer_profile }} socket buffers, and {{ smartOptResult.best_dns }} resolver ({{ smartOptResult.best_dns_latency_ms }} ms latency).
             </span>
           </div>
         </section>
@@ -585,14 +621,14 @@
               <span>Anti-censorship &amp; DPI bypass</span>
             </span>
             <span class="badge-pill" :class="telemetry.settings.dpi_bypass ? 'active' : ''">
-              {{ telemetry.settings.dpi_bypass ? 'Bypassing' : 'Disabled' }}
+              {{ telemetry.settings.dpi_bypass ? 'Active' : 'Disabled' }}
             </span>
           </div>
 
           <div class="switch-row" style="margin-top: 2px;">
             <div class="switch-label-col">
-              <span class="switch-title">Bypass Internet Positif &amp; DPI</span>
-              <span class="switch-desc">Splits TLS ClientHello across TCP segments (MSS 160) to bypass ISP SNI filtering (Reddit, Vimeo) without VPN</span>
+              <span class="switch-title">Deep packet inspection (DPI) evasion</span>
+              <span class="switch-desc">Splits TLS ClientHello across TCP segments (MSS 160) to bypass ISP SNI filtering (Reddit, Vimeo) without a VPN</span>
             </div>
             <label class="md3-switch">
               <input
@@ -610,11 +646,11 @@
           <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--outline-variant);">
             <div style="font-size: 11px; color: var(--on-surface-variant); min-width: 0; flex: 1;" class="truncate-text">
               <span v-if="siteCheckStatus">{{ siteCheckStatus }}</span>
-              <span v-else>Verify access to blocked websites</span>
+              <span v-else>Verify access to restricted services</span>
             </div>
             <button class="btn btn-secondary" style="padding: 4px 10px; font-size: 11px; flex-shrink: 0;" :disabled="isCheckingSite" @click="checkBlockedSite">
               <Icons name="refresh" :size="11" :class="{ 'spin-anim': isCheckingSite }" />
-              <span>{{ isCheckingSite ? 'Probing...' : 'Test Reddit' }}</span>
+              <span>{{ isCheckingSite ? 'Probing...' : 'Verify Reddit' }}</span>
             </button>
           </div>
         </section>
@@ -667,7 +703,7 @@
           <div class="switch-row" style="margin-top: 6px;">
             <div class="switch-label-col">
               <span class="switch-title">Wi-Fi scan throttling</span>
-              <span class="switch-desc">Turn off to accelerate roaming between access points</span>
+              <span class="switch-desc">Reduce background scan frequency to optimize power consumption</span>
             </div>
             <label class="md3-switch">
               <input
@@ -684,8 +720,8 @@
           <!-- Mobile Data Always On Switch -->
           <div class="switch-row">
             <div class="switch-label-col">
-              <span class="switch-title">Mobile data always active</span>
-              <span class="switch-desc">Keep cellular warm while on Wi-Fi for zero-lag handovers</span>
+              <span class="switch-title">Mobile data standby</span>
+              <span class="switch-desc">Maintain cellular connectivity during Wi-Fi sessions for seamless handover</span>
             </div>
             <label class="md3-switch">
               <input
@@ -793,13 +829,42 @@ const telemetry = reactive({
     android_ver: '',
     api_level: 0,
     ram_total_mb: 0,
+    ram_installed_gb: 0,
     ram_tier: 'standard'
   },
   sim: {
     active_slot: 0,
     active_subid: 1,
-    slot0: { inserted: false, state: '', operator: '' },
-    slot1: { inserted: false, state: '', operator: '' }
+    slot0: {
+      inserted: false,
+      state: '',
+      operator: '',
+      network_type: 'unknown',
+      rsrp: 0,
+      rsrq: 0,
+      sinr: 0,
+      level: 0,
+      cell_id: -1,
+      pci: 0,
+      band: 0,
+      data_enabled: false,
+      data_state: 'disconnected'
+    },
+    slot1: {
+      inserted: false,
+      state: '',
+      operator: '',
+      network_type: 'unknown',
+      rsrp: 0,
+      rsrq: 0,
+      sinr: 0,
+      level: 0,
+      cell_id: -1,
+      pci: 0,
+      band: 0,
+      data_enabled: false,
+      data_state: 'disconnected'
+    }
   },
   wifi: {
     enabled: true,
@@ -821,6 +886,10 @@ const telemetry = reactive({
     sinr: 0,
     level: 0,
     cell_id: -1,
+    pci: 0,
+    band: 0,
+    data_enabled: false,
+    data_state: 'disconnected',
     allowed_types: ''
   },
   network: {
@@ -849,8 +918,42 @@ const telemetry = reactive({
 })
 
 const selectedSimSlot = ref(0)
+const activeSimInfo = computed(() => {
+  if (selectedSimSlot.value === 1 && telemetry.sim.slot1 && telemetry.sim.slot1.inserted) {
+    return telemetry.sim.slot1
+  }
+  if (selectedSimSlot.value === 0 && telemetry.sim.slot0 && telemetry.sim.slot0.inserted) {
+    return telemetry.sim.slot0
+  }
+  if (selectedSimSlot.value === 1 && telemetry.sim.slot1) {
+    return telemetry.sim.slot1
+  }
+  if (telemetry.sim.slot0) {
+    return telemetry.sim.slot0
+  }
+  return telemetry.cellular
+})
 const isOptimizing = ref(false)
 const smartOptResult = ref(null)
+
+function formatRamInstalled(mb, gb) {
+  if (gb && gb > 0) return gb
+  if (!mb || mb <= 0) return 0
+  const raw = Math.round((mb + 650) / 1024)
+  const tiers = [1, 2, 3, 4, 6, 8, 12, 16, 24]
+  for (const t of tiers) {
+    if (Math.abs(raw - t) <= 1 && raw <= t) return t
+  }
+  return raw
+}
+
+function formatRamTier(tier) {
+  if (!tier) return 'Standard tier'
+  const t = tier.toLowerCase()
+  if (t === 'high') return 'High tier'
+  if (t === 'low') return 'Entry tier'
+  return 'Standard tier'
+}
 
 const isWifiActive = computed(() => {
   if (telemetry.network.active_iface && telemetry.network.active_iface.startsWith('wlan')) {
@@ -896,7 +999,7 @@ const availableTcpCc = computed(() => {
   return (telemetry.tcp.available_cc || 'cubic reno').split(' ').filter(Boolean)
 })
 
-/* Live Traffic State */
+/* Traffic Rate State */
 const liveRate = reactive({
   rxRateStr: '0 KB/s',
   txRateStr: '0 KB/s',
@@ -955,7 +1058,10 @@ async function refreshTelemetry(userTriggered = false) {
     if (data) {
       if (data.device) Object.assign(telemetry.device, data.device)
       if (data.sim) {
-        Object.assign(telemetry.sim, data.sim)
+        telemetry.sim.active_slot = data.sim.active_slot
+        telemetry.sim.active_subid = data.sim.active_subid
+        if (data.sim.slot0) Object.assign(telemetry.sim.slot0, data.sim.slot0)
+        if (data.sim.slot1) Object.assign(telemetry.sim.slot1, data.sim.slot1)
         if (data.sim.active_slot !== undefined && !userTriggered) {
           selectedSimSlot.value = data.sim.active_slot
         }
@@ -1134,12 +1240,12 @@ async function toggleSpeedtest() {
 
 /* Cellular Modes */
 const cellularModes = [
-  { id: 'auto', title: 'Global auto', desc: '5G / 4G / 3G / 2G multi-mode' },
-  { id: '5g_only', title: '5G only (NR)', desc: 'Strictly 5G New Radio bands' },
-  { id: '5g_lte', title: '5G / 4G preferred', desc: '5G with 4G LTE fallback' },
-  { id: 'lte_only', title: '4G only (LTE)', desc: 'LTE only, prevents 5G drain' },
-  { id: '3g_only', title: '3G only', desc: 'Legacy WCDMA / HSPA' },
-  { id: '2g_only', title: '2G only (GSM)', desc: 'Ultra-low battery voice/SMS' }
+  { id: 'auto', title: 'Global multi-mode', desc: '5G, 4G LTE, 3G, and 2G auto' },
+  { id: '5g_only', title: '5G New Radio (NR)', desc: 'Exclusive 5G standalone & NSA' },
+  { id: '5g_lte', title: '5G & 4G preferred', desc: 'Prioritize 5G with LTE fallback' },
+  { id: 'lte_only', title: '4G LTE only', desc: 'Restrict connection to LTE bands' },
+  { id: '3g_only', title: '3G UMTS/HSPA', desc: 'Legacy 3G network coverage' },
+  { id: '2g_only', title: '2G GSM only', desc: 'Power-efficient voice and SMS' }
 ]
 
 const selectedCellularMode = ref('auto')
@@ -1148,10 +1254,10 @@ async function applyCellularMode(modeId) {
   selectedCellularMode.value = modeId
   const res = await runBridgeJson('set_mode', selectedSimSlot.value, modeId)
   if (res && res.success) {
-    showToast(`Locked SIM ${selectedSimSlot.value + 1} to ${modeId}`)
+    showToast(`SIM ${selectedSimSlot.value + 1} radio mode applied`)
     refreshTelemetry()
   } else {
-    showToast('Failed to apply network mode')
+    showToast('Failed to apply radio mode')
   }
 }
 
@@ -1269,10 +1375,10 @@ async function toggleDpiBypass(e) {
   try {
     await runBridge('set_dpi_bypass', enable ? '1' : '0')
     telemetry.settings.dpi_bypass = enable
-    showToast(enable ? 'Anti-Censorship DPI bypass activated' : 'DPI bypass deactivated')
+    showToast(enable ? 'DPI evasion active' : 'DPI evasion disabled')
     await refreshTelemetry()
   } catch (err) {
-    showToast('Failed to toggle DPI bypass')
+    showToast('Failed to toggle DPI evasion')
   } finally {
     isTogglingDpi.value = false
   }
@@ -1285,13 +1391,13 @@ async function checkBlockedSite() {
     const res = await runBridgeJson('check_site', 'www.reddit.com')
     if (res && res.reachable) {
       siteCheckStatus.value = `Accessible (${res.ip || 'OK'})`
-      showToast('Success: Reddit is accessible!')
+      showToast('Website is reachable')
     } else if (res && res.reason === 'dns_poisoned') {
-      siteCheckStatus.value = `DNS poisoned (${res.ip})`
-      showToast('Blocked: DNS was poisoned by ISP')
+      siteCheckStatus.value = `DNS intercepted (${res.ip})`
+      showToast('DNS was intercepted by ISP')
     } else {
       siteCheckStatus.value = res?.reason || 'Connection refused'
-      showToast('Site unreachable, enable DPI Bypass')
+      showToast('Site unreachable, enable DPI evasion')
     }
   } catch (e) {
     siteCheckStatus.value = 'Probe failed'
@@ -1330,11 +1436,11 @@ const modalState = reactive({
 })
 
 function confirmRadioRefresh() {
-  modalState.title = 'Refresh cellular radio?'
-  modalState.desc = 'This temporarily cycles airplane mode for 1 second to drop stuck data sessions and reconnect to the strongest cell tower. Connectivity will pause for 2 seconds.'
+  modalState.title = 'Refresh cellular connection?'
+  modalState.desc = 'This temporarily cycles the airplane mode interface to drop stale data contexts and renegotiate attachment with the optimal base station. Connectivity will briefly pause for two seconds.'
   modalState.action = async () => {
     modalState.visible = false
-    showToast('Refreshing radio link...')
+    showToast('Refreshing radio connection...')
     await runBridge('radio_refresh')
     setTimeout(refreshTelemetry, 2500)
   }

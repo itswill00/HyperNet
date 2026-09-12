@@ -425,6 +425,44 @@ html, body, #app {
   text-overflow: ellipsis;
 }
 
+/* Stat Grid 3 & Hardware Strip */
+.stat-grid-3,
+.hardware-strip {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.hardware-col {
+  background: var(--surface-container-low);
+  border: 1px solid var(--surface-container-high);
+  border-radius: 12px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.hw-label {
+  font-size: 10px;
+  color: var(--on-surface-variant);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hw-val {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--on-surface);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Icon Badge */
 .icon-badge {
   width: 38px;

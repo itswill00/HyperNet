@@ -169,7 +169,7 @@ static int cmd_traffic(void) {
 }
 
 /* Parse Wi-Fi details from cmd wifi status */
-static void get_wifi_details(void) {
+static void get_wifi_details(int *out_rssi, int *out_speed) {
     FILE *p = popen("cmd wifi status 2>/dev/null", "r");
     char ssid[128] = "unknown";
     char bssid[64] = "unknown";
@@ -298,6 +298,25 @@ static void get_wifi_details(void) {
     printf("\"band\":"); json_print_escaped(band); printf(",");
     printf("\"standard\":"); json_print_escaped(standard);
     printf("}");
+
+    if (out_rssi) *out_rssi = is_connected ? rssi : 0;
+    if (out_speed) *out_speed = is_connected ? link_speed : 0;
+}
+
+/* Accurate Physical RAM Sizing (accounts for kernel/hardware reservations) */
+static int get_physical_ram_gb(int mem_total_mb) {
+    if (mem_total_mb <= 0) return 0;
+    int raw = (mem_total_mb + 650) / 1024;
+    if (raw <= 1) return 1;
+    if (raw <= 2) return 2;
+    if (raw <= 3) return 3;
+    if (raw <= 4) return 4;
+    if (raw <= 6) return 6;
+    if (raw <= 8) return 8;
+    if (raw <= 12) return 12;
+    if (raw <= 16) return 16;
+    if (raw <= 24) return 24;
+    return raw;
 }
 
 /* Device Hardware & Platform Intelligence */
@@ -325,9 +344,10 @@ static void get_device_details(char *out_tier, size_t tier_len) {
         fclose(mf);
     }
     int ram_mb = (int)(mem_total_kb / 1024);
+    int ram_gb = get_physical_ram_gb(ram_mb);
     const char *ram_tier = "standard";
-    if (ram_mb < 3800) ram_tier = "low";
-    else if (ram_mb > 8192) ram_tier = "high";
+    if (ram_gb <= 3) ram_tier = "low";
+    else if (ram_gb >= 8) ram_tier = "high";
 
     if (out_tier && tier_len > 0) {
         strncpy(out_tier, ram_tier, tier_len - 1);
@@ -341,209 +361,402 @@ static void get_device_details(char *out_tier, size_t tier_len) {
     printf("\"android_ver\":"); json_print_escaped(release); printf(",");
     printf("\"api_level\":%d,", atoi(sdk));
     printf("\"ram_total_mb\":%d,", ram_mb);
+    printf("\"ram_installed_gb\":%d,", ram_gb);
     printf("\"ram_tier\":"); json_print_escaped(ram_tier);
     printf("}");
 }
 
-/* Multi-SIM Slot Detection */
-static void get_sim_details(int *out_active_slot) {
+/* Unified SIM Slot and Cellular Radio Telemetry */
+typedef struct {
+    int inserted;
+    char state[32];
+    char operator_name[128];
+    char network_type[64];
+    int rsrp;
+    int rsrq;
+    int sinr;
+    int level;
+    long long cell_id;
+    int pci;
+    int band;
+    int data_enabled;
+    char data_state[32];
+} SimSlotInfo;
+
+static int parse_int_after(const char *haystack, const char *key, int default_val) {
+    const char *p = strstr(haystack, key);
+    if (!p) return default_val;
+    p += strlen(key);
+    while (*p == ' ' || *p == '=') p++;
+    char *end = NULL;
+    long val = strtol(p, &end, 10);
+    if (end == p) return default_val;
+    return (int)val;
+}
+
+static long long parse_ll_after(const char *haystack, const char *key, long long default_val) {
+    const char *p = strstr(haystack, key);
+    if (!p) return default_val;
+    p += strlen(key);
+    while (*p == ' ' || *p == '=') p++;
+    char *end = NULL;
+    long long val = strtoll(p, &end, 10);
+    if (end == p) return default_val;
+    return val;
+}
+
+static void parse_string_after(const char *haystack, const char *key, char *out, size_t out_len, const char *delims) {
+    const char *p = strstr(haystack, key);
+    if (!p) return;
+    p += strlen(key);
+    while (*p == ' ' || *p == '=') p++;
+    size_t idx = 0;
+    while (*p && idx + 1 < out_len) {
+        if (strchr(delims, *p)) break;
+        out[idx++] = *p++;
+    }
+    out[idx] = '\0';
+}
+
+static void get_all_sim_and_cellular_details(SimSlotInfo slots[2], int *out_active_slot, int *out_active_subid, char *out_allowed_types, size_t allowed_types_len) {
+    memset(slots, 0, sizeof(SimSlotInfo) * 2);
+
+    for (int i = 0; i < 2; i++) {
+        strcpy(slots[i].state, "absent");
+        strcpy(slots[i].operator_name, "");
+        strcpy(slots[i].network_type, "unknown");
+        strcpy(slots[i].data_state, "disconnected");
+        slots[i].cell_id = -1;
+    }
+
     char sim_states[64] = "absent,absent";
     char sim_ops[128] = "";
+    char sim_orig_ops[128] = "";
     char active_sub[16] = "1";
+    char prop_types[128] = "";
 
     read_cmd_line("getprop gsm.sim.state 2>/dev/null", sim_states, sizeof(sim_states));
+    read_cmd_line("getprop gsm.operator.orig.alpha 2>/dev/null", sim_orig_ops, sizeof(sim_orig_ops));
     read_cmd_line("getprop gsm.sim.operator.alpha 2>/dev/null", sim_ops, sizeof(sim_ops));
+    read_cmd_line("getprop gsm.network.type 2>/dev/null", prop_types, sizeof(prop_types));
     read_cmd_line("settings get global multi_sim_data_call 2>/dev/null", active_sub, sizeof(active_sub));
 
-    char state0[32] = "absent", state1[32] = "absent";
-    char op0[64] = "", op1[64] = "";
-
+    /* Parse gsm.sim.state */
     char *comma = strchr(sim_states, ',');
     if (comma) {
         *comma = '\0';
-        strncpy(state0, sim_states, sizeof(state0) - 1);
-        strncpy(state1, comma + 1, sizeof(state1) - 1);
+        strncpy(slots[0].state, sim_states, sizeof(slots[0].state) - 1);
+        strncpy(slots[1].state, comma + 1, sizeof(slots[1].state) - 1);
     } else {
-        strncpy(state0, sim_states, sizeof(state0) - 1);
+        strncpy(slots[0].state, sim_states, sizeof(slots[0].state) - 1);
     }
 
-    for (char *c = state0; *c; c++) *c = tolower((unsigned char)*c);
-    for (char *c = state1; *c; c++) *c = tolower((unsigned char)*c);
+    for (int i = 0; i < 2; i++) {
+        for (char *c = slots[i].state; *c; c++) *c = (char)tolower((unsigned char)*c);
+        if (strcmp(slots[i].state, "loaded") == 0 ||
+            strcmp(slots[i].state, "ready") == 0 ||
+            strcmp(slots[i].state, "pin_required") == 0 ||
+            strcmp(slots[i].state, "puk_required") == 0 ||
+            strcmp(slots[i].state, "network_locked") == 0) {
+            slots[i].inserted = 1;
+        }
+    }
 
-    char *op_comma = strchr(sim_ops, ',');
-    if (op_comma) {
-        *op_comma = '\0';
-        strncpy(op0, sim_ops, sizeof(op0) - 1);
-        strncpy(op1, op_comma + 1, sizeof(op1) - 1);
+    /* Operator names from properties */
+    char *op_source = strlen(sim_orig_ops) > 0 ? sim_orig_ops : sim_ops;
+    comma = strchr(op_source, ',');
+    if (comma) {
+        *comma = '\0';
+        strncpy(slots[0].operator_name, op_source, sizeof(slots[0].operator_name) - 1);
+        strncpy(slots[1].operator_name, comma + 1, sizeof(slots[1].operator_name) - 1);
     } else {
-        strncpy(op0, sim_ops, sizeof(op0) - 1);
+        strncpy(slots[0].operator_name, op_source, sizeof(slots[0].operator_name) - 1);
+    }
+
+    /* Fallbacks for slot 1 operator */
+    if (strlen(slots[1].operator_name) == 0) {
+        char op2[64] = "";
+        if (read_cmd_line("getprop gsm.sim.operator.alpha.2 2>/dev/null", op2, sizeof(op2)) == 0 && strlen(op2) > 0) {
+            strncpy(slots[1].operator_name, op2, sizeof(slots[1].operator_name) - 1);
+        } else if (read_cmd_line("getprop gsm.operator.alpha.2 2>/dev/null", op2, sizeof(op2)) == 0 && strlen(op2) > 0) {
+            strncpy(slots[1].operator_name, op2, sizeof(slots[1].operator_name) - 1);
+        }
+    }
+
+    /* Network types from properties */
+    comma = strchr(prop_types, ',');
+    if (comma) {
+        *comma = '\0';
+        if (strcmp(prop_types, "Unknown") != 0 && strlen(prop_types) > 0)
+            strncpy(slots[0].network_type, prop_types, sizeof(slots[0].network_type) - 1);
+        if (strcmp(comma + 1, "Unknown") != 0 && strlen(comma + 1) > 0)
+            strncpy(slots[1].network_type, comma + 1, sizeof(slots[1].network_type) - 1);
+    } else if (strlen(prop_types) > 0 && strcmp(prop_types, "Unknown") != 0) {
+        strncpy(slots[0].network_type, prop_types, sizeof(slots[0].network_type) - 1);
     }
 
     int active_slot = 0;
-    if (strcmp(state0, "absent") == 0 && strcmp(state1, "absent") != 0) {
-        active_slot = 1;
-    } else if (strcmp(state0, "absent") != 0 && strcmp(state1, "absent") != 0) {
-        int sub = atoi(active_sub);
-        if (sub >= 2) active_slot = 1;
-    }
+    int sub = atoi(active_sub);
+    if (sub >= 2) active_slot = 1;
+    if (!slots[0].inserted && slots[1].inserted) active_slot = 1;
 
-    if (out_active_slot) *out_active_slot = active_slot;
-
-    printf("\"sim\":{");
-    printf("\"active_slot\":%d,", active_slot);
-    printf("\"active_subid\":%d,", atoi(active_sub) > 0 ? atoi(active_sub) : (active_slot + 1));
-    printf("\"slot0\":{\"inserted\":%s,\"state\":", strcmp(state0, "absent") != 0 ? "true" : "false");
-    json_print_escaped(state0); printf(",\"operator\":"); json_print_escaped(op0); printf("},");
-    printf("\"slot1\":{\"inserted\":%s,\"state\":", strcmp(state1, "absent") != 0 ? "true" : "false");
-    json_print_escaped(state1); printf(",\"operator\":"); json_print_escaped(op1); printf("}");
-    printf("}");
-}
-
-/* Parse Cellular details across Qualcomm, MediaTek, Exynos, and Tensor */
-static void get_cellular_details(int *out_rsrp, int *out_sinr) {
-    char operator_name[128] = "unknown";
-    char network_type[64] = "unknown";
-    int rsrp = 0;
-    int rsrq = 0;
-    int sinr = 0;
-    int level = 0;
-    long long cell_id = -1;
-    char allowed_types[256] = "";
-
-    /* Fast check via system properties */
-    char prop_op[128] = "";
-    char prop_type[128] = "";
-    read_cmd_line("getprop gsm.sim.operator.alpha 2>/dev/null", prop_op, sizeof(prop_op));
-    if (strlen(prop_op) > 0 && strcmp(prop_op, ",") != 0) {
-        char *comma = strchr(prop_op, ',');
-        if (comma && comma != prop_op) *comma = '\0';
-        else if (comma && comma == prop_op && *(comma + 1) != '\0') {
-            memmove(prop_op, comma + 1, strlen(comma + 1) + 1);
-        }
-        if (strlen(prop_op) > 0) strncpy(operator_name, prop_op, sizeof(operator_name) - 1);
-    }
-
-    read_cmd_line("getprop gsm.network.type 2>/dev/null", prop_type, sizeof(prop_type));
-    if (strlen(prop_type) > 0 && strcmp(prop_type, "Unknown,Unknown") != 0) {
-        char *comma = strchr(prop_type, ',');
-        if (comma && comma != prop_type) *comma = '\0';
-        else if (comma && comma == prop_type && *(comma + 1) != '\0') {
-            memmove(prop_type, comma + 1, strlen(comma + 1) + 1);
-        }
-        if (strlen(prop_type) > 0 && strcmp(prop_type, "Unknown") != 0) {
-            strncpy(network_type, prop_type, sizeof(network_type) - 1);
-        }
-    }
-
-    /* Targeted dumpsys grep: fast and immune to line truncation */
-    FILE *p = popen("dumpsys telephony.registry 2>/dev/null | grep -E 'mSignalStrength|CellSignalStrength|mCellIdentity|mOperatorAlpha' | head -n 40", "r");
+    /* Dumpsys Telephony Registry (strictly scoped per Phone Id) */
+    FILE *p = popen("dumpsys telephony.registry 2>/dev/null", "r");
     if (p) {
-        char line[1024];
+        char line[2048];
+        int cur_slot = -1;
         while (fgets(line, sizeof(line), p)) {
-            char *op = strstr(line, "mOperatorAlphaLong=");
-            if (op) {
-                op += 19;
-                char *comma = strchr(op, ',');
-                if (comma) *comma = '\0';
-                if (strcmp(op, "null") != 0 && strlen(op) > 0) {
-                    strncpy(operator_name, op, sizeof(operator_name) - 1);
+            if (strstr(line, "local logs:") || strstr(line, "mPhoneCapability")) {
+                break;
+            }
+
+            char *p0 = strstr(line, "Phone Id=0");
+            if (!p0) p0 = strstr(line, "PhoneId=0");
+            if (p0) { cur_slot = 0; continue; }
+
+            char *p1 = strstr(line, "Phone Id=1");
+            if (!p1) p1 = strstr(line, "PhoneId=1");
+            if (p1) { cur_slot = 1; continue; }
+
+            char *def_p = strstr(line, "mDefaultPhoneId=");
+            if (def_p) {
+                int dp = atoi(def_p + 16);
+                if (dp == 0 || dp == 1) active_slot = dp;
+            }
+
+            if (cur_slot < 0 || cur_slot > 1) continue;
+
+            /* ServiceState: Voice / Data registration & Operator */
+            if (strstr(line, "mServiceState=")) {
+                char op_long[128] = "";
+                parse_string_after(line, "mOperatorAlphaLong=", op_long, sizeof(op_long), ",}\r\n");
+                if (strlen(op_long) > 0 && strcmp(op_long, "null") != 0) {
+                    strncpy(slots[cur_slot].operator_name, op_long, sizeof(slots[cur_slot].operator_name) - 1);
+                }
+
+                if (strstr(line, "mVoiceRegState=0") || strstr(line, "mDataRegState=0")) {
+                    slots[cur_slot].inserted = 1;
+                    if (strcmp(slots[cur_slot].state, "absent") == 0) {
+                        strcpy(slots[cur_slot].state, "in_service");
+                    }
                 }
             }
 
-            /* Match LTE */
-            char *lte = strstr(line, "CellSignalStrengthLte");
-            if (lte) {
-                if (strcmp(network_type, "unknown") == 0) strcpy(network_type, "LTE");
-                char *rp = strstr(lte, "rsrp");
-                if (rp) {
-                    char *eq = strchr(rp, '=');
-                    if (eq) rsrp = atoi(eq + 1);
-                }
-                char *rq = strstr(lte, "rsrq");
-                if (rq) {
-                    char *eq = strchr(rq, '=');
-                    if (eq) rsrq = atoi(eq + 1);
-                }
-                char *sn = strstr(lte, "rssnr");
-                if (!sn) sn = strstr(lte, "sinr");
-                if (sn) {
-                    char *eq = strchr(sn, '=');
-                    if (eq) sinr = atoi(eq + 1);
-                }
-                char *lv = strstr(lte, "level");
-                if (lv) {
-                    char *eq = strchr(lv, '=');
-                    if (eq) level = atoi(eq + 1);
+            /* Data enabled / user mobile data state */
+            if (strstr(line, "mIsDataEnabled=") || strstr(line, "mUserMobileDataState=")) {
+                if (strstr(line, "true")) slots[cur_slot].data_enabled = 1;
+                else if (strstr(line, "false")) slots[cur_slot].data_enabled = 0;
+            }
+
+            /* Data connection state */
+            if (strstr(line, "mDataConnectionState=")) {
+                int dstate = parse_int_after(line, "mDataConnectionState=", -1);
+                if (dstate == 2) strcpy(slots[cur_slot].data_state, "connected");
+                else if (dstate == 1) strcpy(slots[cur_slot].data_state, "connecting");
+                else if (dstate == 3) strcpy(slots[cur_slot].data_state, "suspended");
+                else strcpy(slots[cur_slot].data_state, "disconnected");
+            }
+
+            /* Telephony Display Info (LTE, LTE_CA/4G+, NR/5G) */
+            char *tdi = strstr(line, "mTelephonyDisplayInfo=");
+            if (tdi) {
+                if (strstr(tdi, "overrideNetwork=LTE_CA")) {
+                    strcpy(slots[cur_slot].network_type, "LTE+");
+                } else if (strstr(tdi, "overrideNetwork=NR_") || strstr(tdi, "network=NR")) {
+                    strcpy(slots[cur_slot].network_type, "5G NR");
+                } else if (strstr(tdi, "network=LTE")) {
+                    if (strcmp(slots[cur_slot].network_type, "unknown") == 0 ||
+                        strcmp(slots[cur_slot].network_type, "LTE+") != 0) {
+                        strcpy(slots[cur_slot].network_type, "LTE");
+                    }
+                } else if (strstr(tdi, "network=UMTS") || strstr(tdi, "network=HSDPA") || strstr(tdi, "network=HSPA")) {
+                    strcpy(slots[cur_slot].network_type, "3G (HSPA)");
+                } else if (strstr(tdi, "network=GSM") || strstr(tdi, "network=EDGE")) {
+                    strcpy(slots[cur_slot].network_type, "2G (EDGE)");
                 }
             }
 
-            /* Match 5G NR */
-            char *nr = strstr(line, "CellSignalStrengthNr");
-            if (nr) {
-                strcpy(network_type, "5G NR");
-                char *rp = strstr(nr, "ssRsrp");
-                if (!rp) rp = strstr(nr, "csiRsrp");
-                if (rp) {
-                    char *eq = strchr(rp, '=');
-                    if (eq) rsrp = atoi(eq + 1);
+            /* Physical Channel Configs: PCI & Band */
+            char *pcc = strstr(line, "mPhysicalChannelConfigs=");
+            if (pcc && !strstr(pcc, "[]")) {
+                int pci = parse_int_after(pcc, "mPhysicalCellId=", -1);
+                if (pci > 0 && pci != 2147483647) {
+                    slots[cur_slot].pci = pci;
+                    if (slots[cur_slot].cell_id <= 0) slots[cur_slot].cell_id = pci;
                 }
-                char *rq = strstr(nr, "ssRsrq");
-                if (!rq) rq = strstr(nr, "csiRsrq");
-                if (rq) {
-                    char *eq = strchr(rq, '=');
-                    if (eq) rsrq = atoi(eq + 1);
-                }
-                char *sn = strstr(nr, "ssSinr");
-                if (!sn) sn = strstr(nr, "csiSinr");
-                if (sn) {
-                    char *eq = strchr(sn, '=');
-                    if (eq) sinr = atoi(eq + 1);
-                }
-                char *lv = strstr(nr, "level");
-                if (lv) {
-                    char *eq = strchr(lv, '=');
-                    if (eq) level = atoi(lv + 1);
+                int band = parse_int_after(pcc, "mBand=", -1);
+                if (band > 0 && band != 2147483647) {
+                    slots[cur_slot].band = band;
                 }
             }
 
-            /* Cell ID */
-            char *cid = strstr(line, "mCellIdentity");
-            if (cid) {
-                char *ci = strstr(cid, "mCi=");
-                if (!ci) ci = strstr(cid, "mCid=");
-                if (!ci) ci = strstr(cid, "cid=");
-                if (ci) {
-                    char *eq = strchr(ci, '=');
-                    if (eq) cell_id = atoll(eq + 1);
+            /* Cell Identity (CI / CID) */
+            char *cid = strstr(line, "mCellIdentity=");
+            if (cid && !strstr(cid, "mCellIdentity=null")) {
+                long long ci = parse_ll_after(cid, "mCi=", -1);
+                if (ci <= 0 || ci == 2147483647) ci = parse_ll_after(cid, "mCid=", -1);
+                if (ci <= 0 || ci == 2147483647) ci = parse_ll_after(cid, "cid=", -1);
+                if (ci > 0 && ci != 2147483647) {
+                    slots[cur_slot].cell_id = ci;
+                }
+                if (strlen(slots[cur_slot].operator_name) == 0) {
+                    char alpha[64] = "";
+                    parse_string_after(cid, "mAlphaLong=", alpha, sizeof(alpha), ",}\r\n");
+                    if (strlen(alpha) > 0 && strcmp(alpha, "null") != 0) {
+                        strncpy(slots[cur_slot].operator_name, alpha, sizeof(slots[cur_slot].operator_name) - 1);
+                    }
+                }
+            }
+
+            /* Signal Strength (RSRP, RSRQ, SINR, Level) */
+            char *ss = strstr(line, "mSignalStrength=");
+            if (ss) {
+                char *prim = strstr(ss, "primary=");
+                int is_nr = (prim && strstr(prim, "CellSignalStrengthNr")) ? 1 : 0;
+                int is_lte = (prim && strstr(prim, "CellSignalStrengthLte")) ? 1 : 0;
+
+                /* 5G NR */
+                char *nr = strstr(ss, "CellSignalStrengthNr");
+                if (nr) {
+                    int ss_rsrp = parse_int_after(nr, "ssRsrp", 2147483647);
+                    if (ss_rsrp == 2147483647) ss_rsrp = parse_int_after(nr, "csiRsrp", 2147483647);
+                    if (ss_rsrp < 0 && ss_rsrp > -160 && (is_nr || ss_rsrp != 2147483647)) {
+                        slots[cur_slot].rsrp = ss_rsrp;
+                        if (strcmp(slots[cur_slot].network_type, "unknown") == 0 ||
+                            strcmp(slots[cur_slot].network_type, "LTE") == 0) {
+                            strcpy(slots[cur_slot].network_type, "5G NR");
+                        }
+                        int ss_rsrq = parse_int_after(nr, "ssRsrq", 2147483647);
+                        if (ss_rsrq <= 0 && ss_rsrq > -40) slots[cur_slot].rsrq = ss_rsrq;
+                        int ss_sinr = parse_int_after(nr, "ssSinr", 2147483647);
+                        if (ss_sinr >= -30 && ss_sinr <= 50) slots[cur_slot].sinr = ss_sinr;
+                        int lvl = parse_int_after(nr, "level", -1);
+                        if (lvl >= 0 && lvl <= 5) slots[cur_slot].level = lvl;
+                    }
+                }
+
+                /* 4G LTE */
+                char *lte = strstr(ss, "CellSignalStrengthLte");
+                if (lte && (slots[cur_slot].rsrp == 0 || is_lte)) {
+                    int l_rsrp = parse_int_after(lte, "rsrp", 2147483647);
+                    if (l_rsrp < 0 && l_rsrp > -160) {
+                        slots[cur_slot].rsrp = l_rsrp;
+                        if (strcmp(slots[cur_slot].network_type, "unknown") == 0) {
+                            strcpy(slots[cur_slot].network_type, "LTE");
+                        }
+                        int l_rsrq = parse_int_after(lte, "rsrq", 2147483647);
+                        if (l_rsrq <= 0 && l_rsrq > -40) slots[cur_slot].rsrq = l_rsrq;
+                        int l_sn = parse_int_after(lte, "rssnr", 2147483647);
+                        if (l_sn == 2147483647) l_sn = parse_int_after(lte, "sinr", 2147483647);
+                        if (l_sn >= -30 && l_sn <= 50) slots[cur_slot].sinr = l_sn;
+                        int lvl = parse_int_after(lte, "level", -1);
+                        if (lvl >= 0 && lvl <= 5) slots[cur_slot].level = lvl;
+                    }
+                }
+
+                /* Fallback to 3G WCDMA / 2G GSM if no LTE/NR */
+                if (slots[cur_slot].rsrp == 0) {
+                    char *wcdma = strstr(ss, "CellSignalStrengthWcdma");
+                    if (wcdma) {
+                        int rscp = parse_int_after(wcdma, "rscp", 2147483647);
+                        if (rscp < 0 && rscp > -160) {
+                            slots[cur_slot].rsrp = rscp;
+                            if (strcmp(slots[cur_slot].network_type, "unknown") == 0) strcpy(slots[cur_slot].network_type, "3G");
+                            int lvl = parse_int_after(wcdma, "level", -1);
+                            if (lvl >= 0 && lvl <= 5) slots[cur_slot].level = lvl;
+                        }
+                    }
+                }
+            }
+
+            /* Fallback mCellInfo for registered cell if rsrp is still 0 */
+            if (slots[cur_slot].rsrp == 0) {
+                char *ci_reg = strstr(line, "mRegistered=YES");
+                if (ci_reg) {
+                    char *ci_lte = strstr(ci_reg, "CellSignalStrengthLte:");
+                    if (ci_lte) {
+                        int rp = parse_int_after(ci_lte, "rsrp", 2147483647);
+                        if (rp < 0 && rp > -160) {
+                            slots[cur_slot].rsrp = rp;
+                            if (strcmp(slots[cur_slot].network_type, "unknown") == 0) strcpy(slots[cur_slot].network_type, "LTE");
+                            int rq = parse_int_after(ci_lte, "rsrq", 2147483647);
+                            if (rq <= 0 && rq > -40) slots[cur_slot].rsrq = rq;
+                            int sn = parse_int_after(ci_lte, "rssnr", 2147483647);
+                            if (sn >= -30 && sn <= 50) slots[cur_slot].sinr = sn;
+                        }
+                    }
                 }
             }
         }
         pclose(p);
     }
 
-    /* Try reading allowed network types */
-    if (read_cmd_line("cmd phone get-allowed-network-types-for-users -s 0 2>/dev/null", allowed_types, sizeof(allowed_types)) != 0 || strlen(allowed_types) == 0) {
-        if (read_cmd_line("cmd phone get-allowed-network-types-for-users 2>/dev/null", allowed_types, sizeof(allowed_types)) != 0 || strlen(allowed_types) == 0) {
-            read_cmd_line("settings get global preferred_network_mode 2>/dev/null", allowed_types, sizeof(allowed_types));
+    /* Final validation for active slot */
+    if (!slots[0].inserted && slots[1].inserted) active_slot = 1;
+    else if (slots[0].inserted && !slots[1].inserted) active_slot = 0;
+
+    if (out_active_slot) *out_active_slot = active_slot;
+    if (out_active_subid) *out_active_subid = (sub > 0 ? sub : (active_slot + 1));
+
+    /* Allowed network types */
+    if (out_allowed_types && allowed_types_len > 0) {
+        out_allowed_types[0] = '\0';
+        char cmd[128];
+        snprintf(cmd, sizeof(cmd), "cmd phone get-allowed-network-types-for-users -s %d 2>/dev/null", active_slot);
+        if (read_cmd_line(cmd, out_allowed_types, allowed_types_len) != 0 || strlen(out_allowed_types) == 0) {
+            if (read_cmd_line("cmd phone get-allowed-network-types-for-users 2>/dev/null", out_allowed_types, allowed_types_len) != 0 || strlen(out_allowed_types) == 0) {
+                snprintf(cmd, sizeof(cmd), "settings get global preferred_network_mode%d 2>/dev/null", active_slot);
+                if (read_cmd_line(cmd, out_allowed_types, allowed_types_len) != 0 || strlen(out_allowed_types) == 0) {
+                    read_cmd_line("settings get global preferred_network_mode 2>/dev/null", out_allowed_types, allowed_types_len);
+                }
+            }
         }
     }
+}
 
-    /* Treat sentinel values */
-    if (rsrp == 2147483647 || rsrp > 0) rsrp = 0;
-    if (rsrq == 2147483647 || rsrq > 0) rsrq = 0;
-    if (sinr == 2147483647) sinr = 0;
+static void emit_sim_json(const SimSlotInfo slots[2], int active_slot, int active_subid) {
+    printf("\"sim\":{");
+    printf("\"active_slot\":%d,", active_slot);
+    printf("\"active_subid\":%d,", active_subid);
+    for (int i = 0; i < 2; i++) {
+        printf("\"slot%d\":{", i);
+        printf("\"inserted\":%s,", slots[i].inserted ? "true" : "false");
+        printf("\"state\":"); json_print_escaped(slots[i].state); printf(",");
+        printf("\"operator\":"); json_print_escaped(slots[i].operator_name); printf(",");
+        printf("\"network_type\":"); json_print_escaped(slots[i].network_type); printf(",");
+        printf("\"rsrp\":%d,", slots[i].rsrp);
+        printf("\"rsrq\":%d,", slots[i].rsrq);
+        printf("\"sinr\":%d,", slots[i].sinr);
+        printf("\"level\":%d,", slots[i].level);
+        printf("\"cell_id\":%lld,", slots[i].cell_id);
+        printf("\"pci\":%d,", slots[i].pci);
+        printf("\"band\":%d,", slots[i].band);
+        printf("\"data_enabled\":%s,", slots[i].data_enabled ? "true" : "false");
+        printf("\"data_state\":"); json_print_escaped(slots[i].data_state);
+        printf("}%s", i == 0 ? "," : "");
+    }
+    printf("}");
+}
 
-    if (out_rsrp) *out_rsrp = rsrp;
-    if (out_sinr) *out_sinr = sinr;
+static void emit_cellular_json(const SimSlotInfo slots[2], int active_slot, const char *allowed_types, int *out_rsrp, int *out_sinr) {
+    int s = (active_slot >= 0 && active_slot < 2) ? active_slot : 0;
+    if (!slots[s].inserted && slots[1 - s].inserted) s = 1 - s;
+
+    if (out_rsrp) *out_rsrp = slots[s].rsrp;
+    if (out_sinr) *out_sinr = slots[s].sinr;
 
     printf("\"cellular\":{");
-    printf("\"operator\":"); json_print_escaped(operator_name); printf(",");
-    printf("\"network_type\":"); json_print_escaped(network_type); printf(",");
-    printf("\"rsrp\":%d,", rsrp);
-    printf("\"rsrq\":%d,", rsrq);
-    printf("\"sinr\":%d,", sinr);
-    printf("\"level\":%d,", level);
-    printf("\"cell_id\":%lld,", cell_id);
+    printf("\"operator\":"); json_print_escaped(slots[s].operator_name[0] ? slots[s].operator_name : "unknown"); printf(",");
+    printf("\"network_type\":"); json_print_escaped(slots[s].network_type); printf(",");
+    printf("\"rsrp\":%d,", slots[s].rsrp);
+    printf("\"rsrq\":%d,", slots[s].rsrq);
+    printf("\"sinr\":%d,", slots[s].sinr);
+    printf("\"level\":%d,", slots[s].level);
+    printf("\"cell_id\":%lld,", slots[s].cell_id);
+    printf("\"pci\":%d,", slots[s].pci);
+    printf("\"band\":%d,", slots[s].band);
+    printf("\"data_enabled\":%s,", slots[s].data_enabled ? "true" : "false");
+    printf("\"data_state\":"); json_print_escaped(slots[s].data_state); printf(",");
     printf("\"allowed_types\":"); json_print_escaped(allowed_types);
     printf("}");
 }
@@ -552,8 +765,8 @@ static void get_cellular_details(int *out_rsrp, int *out_sinr) {
 static void get_network_health(int is_wifi, int is_cell, int wifi_rssi, int wifi_speed, int cell_rsrp, int cell_sinr) {
     int score = 0;
     const char *grade = "fair";
-    char summary[128] = "Idle network connection";
-    char recommendation[256] = "Network parameters active";
+    char summary[128] = "No active network traffic detected";
+    char recommendation[256] = "Default routing tables are configured";
 
     if (is_wifi) {
         score = 55;
@@ -571,15 +784,15 @@ static void get_network_health(int is_wifi, int is_cell, int wifi_rssi, int wifi
         if (score >= 85) {
             grade = "optimal";
             snprintf(summary, sizeof(summary), "High-speed Wi-Fi connection (%d Mbps)", wifi_speed > 0 ? wifi_speed : 100);
-            strcpy(recommendation, "Low RF noise, peak bufferbloat resistance");
+            strcpy(recommendation, "Excellent signal clarity with minimal latency jitter.");
         } else if (score >= 70) {
             grade = "good";
-            strcpy(summary, "Stable Wi-Fi link");
-            strcpy(recommendation, "Good signal coverage");
+            strcpy(summary, "Stable Wi-Fi connection");
+            strcpy(recommendation, "Reliable signal coverage and good throughput.");
         } else {
             grade = "fair";
-            strcpy(summary, "Weak Wi-Fi signal");
-            strcpy(recommendation, "Move closer to access point or enable roaming");
+            strcpy(summary, "Low Wi-Fi signal strength");
+            strcpy(recommendation, "Consider moving closer to the access point for improved stability.");
         }
     } else if (is_cell) {
         score = 50;
@@ -595,22 +808,22 @@ static void get_network_health(int is_wifi, int is_cell, int wifi_rssi, int wifi
 
         if (score >= 80) {
             grade = "optimal";
-            strcpy(summary, "Strong cellular carrier link");
-            strcpy(recommendation, "Clean RF SNR, optimal tower attachment");
+            strcpy(summary, "Strong cellular connection");
+            strcpy(recommendation, "Optimal signal-to-noise ratio and stable tower reception.");
         } else if (score >= 65) {
             grade = "good";
-            strcpy(summary, "Good cellular link");
-            strcpy(recommendation, "Adequate coverage");
+            strcpy(summary, "Stable cellular connection");
+            strcpy(recommendation, "Adequate signal strength and reliable data reception.");
         } else {
             grade = "fair";
-            strcpy(summary, "Low cellular signal quality");
-            strcpy(recommendation, "Tap 'Refresh tower' or switch to Wi-Fi");
+            strcpy(summary, "Weak cellular signal");
+            strcpy(recommendation, "Signal quality is degraded; reconnecting to the tower is recommended.");
         }
     } else {
         score = 20;
         grade = "poor";
-        strcpy(summary, "No active default gateway route");
-        strcpy(recommendation, "Connect to Wi-Fi or mobile data");
+        strcpy(summary, "No active internet route");
+        strcpy(recommendation, "Please connect to a Wi-Fi access point or enable mobile data.");
     }
 
     if (score > 100) score = 100;
@@ -633,18 +846,24 @@ static int cmd_info(void) {
     get_device_details(ram_tier, sizeof(ram_tier));
     printf(",");
 
-    /* 2. SIM slots */
+    /* 2. SIM & Cellular details */
+    SimSlotInfo sim_slots[2];
     int active_slot = 0;
-    get_sim_details(&active_slot);
+    int active_subid = 1;
+    char allowed_types[256] = "";
+    int cell_rsrp = 0, cell_sinr = 0;
+    get_all_sim_and_cellular_details(sim_slots, &active_slot, &active_subid, allowed_types, sizeof(allowed_types));
+
+    emit_sim_json(sim_slots, active_slot, active_subid);
     printf(",");
 
     /* 3. Wi-Fi */
-    get_wifi_details();
+    int wifi_rssi = 0, wifi_speed = 0;
+    get_wifi_details(&wifi_rssi, &wifi_speed);
     printf(",");
 
     /* 4. Cellular */
-    int cell_rsrp = 0, cell_sinr = 0;
-    get_cellular_details(&cell_rsrp, &cell_sinr);
+    emit_cellular_json(sim_slots, active_slot, allowed_types, &cell_rsrp, &cell_sinr);
     printf(",");
 
     /* 5. Default route via ip route get (highest precision on Android) */
@@ -674,7 +893,7 @@ static int cmd_info(void) {
     /* 6. Network health diagnosis */
     int is_wifi = (strncmp(def_iface, "wlan", 4) == 0);
     int is_cell = (strncmp(def_iface, "rmnet", 5) == 0 || strncmp(def_iface, "ccmni", 5) == 0 || strncmp(def_iface, "pdp", 3) == 0);
-    get_network_health(is_wifi, is_cell, 0, 0, cell_rsrp, cell_sinr);
+    get_network_health(is_wifi, is_cell, wifi_rssi, wifi_speed, cell_rsrp, cell_sinr);
     printf(",");
 
     /* 7. TCP parameters */
@@ -878,9 +1097,10 @@ static void internal_get_ram_tier(char *out_tier, size_t tier_len) {
         fclose(mf);
     }
     int ram_mb = (int)(mem_total_kb / 1024);
+    int ram_gb = get_physical_ram_gb(ram_mb);
     const char *ram_tier = "standard";
-    if (ram_mb < 3800) ram_tier = "low";
-    else if (ram_mb > 8192) ram_tier = "high";
+    if (ram_gb <= 3) ram_tier = "low";
+    else if (ram_gb >= 8) ram_tier = "high";
 
     if (out_tier && tier_len > 0) {
         strncpy(out_tier, ram_tier, tier_len - 1);
