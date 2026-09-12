@@ -88,10 +88,12 @@ chmod 755 system/bin/libhypernet.so
 
 # 2. Build single-file WebUI
 if [ -d "webui" ]; then
+    if [ ! -d "webui/node_modules" ]; then
+        echo "installing webui build dependencies..."
+        (cd webui && npm install --no-audit --no-fund)
+    fi
     echo "building single-file webui bundle..."
-    cd webui
-    node ./node_modules/vite/bin/vite.js build
-    cd "$PROJECT_DIR"
+    (cd webui && node ./node_modules/vite/bin/vite.js build)
     mkdir -p webroot
     cp -f webui/dist/index.html webroot/index.html
     chmod 644 webroot/index.html
