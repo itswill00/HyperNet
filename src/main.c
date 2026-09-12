@@ -1229,11 +1229,105 @@ static int cmd_radio_refresh(void) {
     return 0;
 }
 
+/* Subnets of BGP-blackholed adult/censored networks that cannot be bypassed with MSS clamping alone */
+static const char *BLACKHOLED_SUBNETS[] = {
+    "66.254.96.0/19",   /* Aylo / MindGeek (Pornhub, Redtube, YouPorn, Brazzers) */
+    "64.210.128.0/19",  /* Reflected Networks */
+    "216.18.160.0/19",  /* Reflected Networks */
+    "208.99.64.0/19",   /* Reflected Networks */
+    "209.239.160.0/20", /* Reflected Networks */
+    "104.232.220.0/22", /* Aylo AS44144 */
+    "31.223.188.0/23",  /* Aylo AS44144 */
+    "104.194.213.0/24",
+    "104.143.95.0/24",
+    "104.232.218.0/24",
+    "84.247.60.0/24",
+    "45.82.199.0/24",
+    "45.12.179.0/24",
+    "89.33.245.0/24",
+    NULL
+};
+
+static void setup_warp_tunnel(int enable) {
+    if (enable) {
+        /* Ensure persistent warp.conf exists */
+        if (access("/data/adb/hypernet/warp.conf", F_OK) != 0) {
+            system("python3 -c '\n"
+                   "import subprocess, urllib.request, json, os\n"
+                   "for wg in [\"/data/adb/modules/hypernet/system/bin/wg\", \"/data/data/com.termux/files/home/HyperNet_Module/system/bin/wg\", \"/data/data/com.termux/files/usr/bin/wg\"]:\n"
+                   "    if os.path.isfile(wg) and os.access(wg, os.X_OK):\n"
+                   "        break\n"
+                   "else:\n"
+                   "    wg = \"wg\"\n"
+                   "try:\n"
+                   "    priv = subprocess.check_output([wg, \"genkey\"]).decode().strip()\n"
+                   "    p = subprocess.Popen([wg, \"pubkey\"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)\n"
+                   "    pub, _ = p.communicate(priv.encode())\n"
+                   "    pub = pub.decode().strip()\n"
+                   "    req = urllib.request.Request(\"https://api.cloudflareclient.com/v0a2158/reg\",\n"
+                   "        data=json.dumps({\"install_id\":\"\",\"tos\":\"2020-04-20T00:00:00.000Z\",\"key\":pub,\"fcm_token\":\"\",\"type\":\"Android\",\"locale\":\"en_US\"}).encode(),\n"
+                   "        headers={\"Content-Type\":\"application/json; charset=UTF-8\",\"User-Agent\":\"okhttp/3.12.1\"})\n"
+                   "    with urllib.request.urlopen(req, timeout=10) as resp:\n"
+                   "        res = json.loads(resp.read().decode())\n"
+                   "    peer_pub = res[\"config\"][\"peers\"][0][\"public_key\"]\n"
+                   "    os.makedirs(\"/data/adb/hypernet\", exist_ok=True)\n"
+                   "    with open(\"/data/adb/hypernet/warp.conf\", \"w\") as f:\n"
+                   "        f.write(f\"[Interface]\\nPrivateKey = {priv}\\n\\n[Peer]\\nPublicKey = {peer_pub}\\nEndpoint = 162.159.192.1:2408\\nAllowedIPs = 0.0.0.0/0\\n\")\n"
+                   "    os.chmod(\"/data/adb/hypernet/warp.conf\", 0o600)\n"
+                   "except Exception:\n"
+                   "    pass\n"
+                   "' >/dev/null 2>&1");
+        }
+
+        if (access("/data/adb/hypernet/warp.conf", F_OK) != 0) return;
+
+        const char *wg = "/data/adb/modules/hypernet/system/bin/wg";
+        if (access(wg, X_OK) != 0) wg = "/data/data/com.termux/files/home/HyperNet_Module/system/bin/wg";
+        if (access(wg, X_OK) != 0) wg = "/data/data/com.termux/files/usr/bin/wg";
+
+        char cmd[512];
+        system("ip link del dev hypernet-warp >/dev/null 2>&1");
+        system("ip link add dev hypernet-warp type wireguard >/dev/null 2>&1");
+        snprintf(cmd, sizeof(cmd), "%s setconf hypernet-warp /data/adb/hypernet/warp.conf >/dev/null 2>&1", wg);
+        system(cmd);
+        system("ip addr add 172.16.0.2/32 dev hypernet-warp >/dev/null 2>&1");
+        system("ip link set hypernet-warp up >/dev/null 2>&1");
+
+        for (int i = 0; BLACKHOLED_SUBNETS[i] != NULL; i++) {
+            snprintf(cmd, sizeof(cmd), "ip route add %s dev hypernet-warp table 1337 >/dev/null 2>&1", BLACKHOLED_SUBNETS[i]);
+            system(cmd);
+            snprintf(cmd, sizeof(cmd), "ip rule add to %s table 1337 priority 9000 >/dev/null 2>&1", BLACKHOLED_SUBNETS[i]);
+            system(cmd);
+        }
+
+        system("iptables -t nat -C POSTROUTING -o hypernet-warp -j MASQUERADE >/dev/null 2>&1 || iptables -t nat -A POSTROUTING -o hypernet-warp -j MASQUERADE >/dev/null 2>&1");
+    } else {
+        for (int i = 0; BLACKHOLED_SUBNETS[i] != NULL; i++) {
+            char cmd[256];
+            snprintf(cmd, sizeof(cmd), "ip rule del to %s table 1337 priority 9000 >/dev/null 2>&1", BLACKHOLED_SUBNETS[i]);
+            system(cmd);
+        }
+        system("ip route flush table 1337 >/dev/null 2>&1");
+        system("iptables -t nat -D POSTROUTING -o hypernet-warp -j MASQUERADE >/dev/null 2>&1");
+        system("ip link del dev hypernet-warp >/dev/null 2>&1");
+    }
+}
+
 /* Anti-Censorship & DPI Bypass: TCP MSS packet fragmentation & DoT */
 static int cmd_set_dpi_bypass(int enable) {
     if (enable) {
+        /* Port 443 HTTPS — clamp MSS to split TLS ClientHello across segments */
         system("iptables -t mangle -C POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1 || iptables -t mangle -I POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1");
         system("ip6tables -t mangle -C POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1 || ip6tables -t mangle -I POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1");
+
+        /* Port 80 HTTP — many sites redirect from HTTP first; ISP DPI can inspect plain Host header */
+        system("iptables -t mangle -C POSTROUTING -p tcp --dport 80 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1 || iptables -t mangle -I POSTROUTING -p tcp --dport 80 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1");
+        system("ip6tables -t mangle -C POSTROUTING -p tcp --dport 80 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1 || ip6tables -t mangle -I POSTROUTING -p tcp --dport 80 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1");
+
+        /* Block QUIC (HTTP/3 UDP 443) — forces browser fallback to TCP/TLS where MSS clamping works.
+         * ponytail: DROP not REJECT so browser degrades to TCP quickly rather than waiting for RST */
+        system("iptables -C OUTPUT -p udp --dport 443 -j DROP >/dev/null 2>&1 || iptables -I OUTPUT -p udp --dport 443 -j DROP >/dev/null 2>&1");
+        system("ip6tables -C OUTPUT -p udp --dport 443 -j DROP >/dev/null 2>&1 || ip6tables -I OUTPUT -p udp --dport 443 -j DROP >/dev/null 2>&1");
 
         /* If private DNS is off, automatically enable Cloudflare Anti-Censorship DNS */
         char curr_dns[64] = "";
@@ -1242,11 +1336,22 @@ static int cmd_set_dpi_bypass(int enable) {
             internal_set_dns("hostname", "1dot1dot1dot1.cloudflare-dns.com");
         }
 
+        /* Native WireGuard tunnel for BGP-blackholed networks (Pornhub, Redtube, etc.) */
+        setup_warp_tunnel(1);
+
         system("mkdir -p /data/adb/modules/hypernet 2>/dev/null; echo '1' > /data/adb/modules/hypernet/dpi_bypass.conf; mkdir -p /data/adb/hypernet 2>/dev/null; echo '1' > /data/adb/hypernet/dpi_bypass.conf");
         printf("{\"success\":true,\"dpi_bypass\":true}\n");
     } else {
         system("iptables -t mangle -D POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1");
         system("ip6tables -t mangle -D POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1");
+        system("iptables -t mangle -D POSTROUTING -p tcp --dport 80 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1");
+        system("ip6tables -t mangle -D POSTROUTING -p tcp --dport 80 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1");
+        system("iptables -D OUTPUT -p udp --dport 443 -j DROP >/dev/null 2>&1");
+        system("ip6tables -D OUTPUT -p udp --dport 443 -j DROP >/dev/null 2>&1");
+
+        /* Tear down native WireGuard tunnel */
+        setup_warp_tunnel(0);
+
         system("mkdir -p /data/adb/modules/hypernet 2>/dev/null; echo '0' > /data/adb/modules/hypernet/dpi_bypass.conf; mkdir -p /data/adb/hypernet 2>/dev/null; echo '0' > /data/adb/hypernet/dpi_bypass.conf");
         printf("{\"success\":true,\"dpi_bypass\":false}\n");
     }
@@ -1452,8 +1557,7 @@ static int cmd_apply_boot(void) {
     char dpi_cfg[16] = "";
     read_cmd_line("cat /data/adb/modules/hypernet/dpi_bypass.conf 2>/dev/null || cat /data/adb/hypernet/dpi_bypass.conf 2>/dev/null", dpi_cfg, sizeof(dpi_cfg));
     if (strcmp(dpi_cfg, "1") == 0) {
-        system("iptables -t mangle -C POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1 || iptables -t mangle -I POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1");
-        system("ip6tables -t mangle -C POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1 || ip6tables -t mangle -I POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1");
+        cmd_set_dpi_bypass(1);
     }
 
     return 0;

@@ -147,8 +147,9 @@ if [ "$DEPLOY" = "true" ]; then
         cp -f \"$PROJECT_DIR/service.sh\" \"\$MOD_TARGET/\"
         cp -f \"$PROJECT_DIR/uninstall.sh\" \"\$MOD_TARGET/\"
         cp -f \"$PROJECT_DIR/system/bin/libhypernet.so\" \"\$MOD_TARGET/system/bin/\"
+        cp -f \"$PROJECT_DIR/system/bin/wg\" \"\$MOD_TARGET/system/bin/\" 2>/dev/null || true
         cp -f \"$PROJECT_DIR/webroot/index.html\" \"\$MOD_TARGET/webroot/\"
-        chmod 755 \"\$MOD_TARGET/service.sh\" \"\$MOD_TARGET/uninstall.sh\" \"\$MOD_TARGET/system/bin/libhypernet.so\"
+        chmod 755 \"\$MOD_TARGET/service.sh\" \"\$MOD_TARGET/uninstall.sh\" \"\$MOD_TARGET/system/bin/libhypernet.so\" \"\$MOD_TARGET/system/bin/wg\"
         chmod 644 \"\$MOD_TARGET/module.prop\" \"\$MOD_TARGET/customize.sh\" \"\$MOD_TARGET/webroot/index.html\"
         chcon -R u:object_r:system_file:s0 \"\$MOD_TARGET\" 2>/dev/null || true
         echo 'deployment completed'

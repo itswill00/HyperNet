@@ -53,6 +53,10 @@ else
 fi
 
 # 3. Cleanup transient caches and temporary files
+ip link del dev hypernet-warp >/dev/null 2>&1 || true
+ip route flush table 1337 >/dev/null 2>&1 || true
+ip rule del priority 9000 >/dev/null 2>&1 || true
+iptables -t nat -D POSTROUTING -o hypernet-warp -j MASQUERADE >/dev/null 2>&1 || true
 rm -f /data/local/tmp/hypernet* 2>/dev/null || true
 
 # 4. Remove module configuration and history
