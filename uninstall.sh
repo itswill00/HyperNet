@@ -16,6 +16,8 @@ if [ -f "$STOCK_CONF" ]; then
     STOCK_DNS_SPEC=$(grep '^stock_private_dns_specifier=' "$STOCK_CONF" 2>/dev/null | cut -d= -f2)
     STOCK_WIFI_THROTTLE=$(grep '^stock_wifi_throttle=' "$STOCK_CONF" 2>/dev/null | cut -d= -f2)
     STOCK_MOBILE_ALWAYS=$(grep '^stock_mobile_always=' "$STOCK_CONF" 2>/dev/null | cut -d= -f2)
+    STOCK_TYPES_S0=$(grep '^stock_allowed_types_s0=' "$STOCK_CONF" 2>/dev/null | cut -d= -f2-)
+    STOCK_TYPES_S1=$(grep '^stock_allowed_types_s1=' "$STOCK_CONF" 2>/dev/null | cut -d= -f2-)
 
     # Restore TCP parameters
     [ -n "$STOCK_CC" ] && sysctl -w net.ipv4.tcp_congestion_control="$STOCK_CC" >/dev/null 2>&1 || true
@@ -41,9 +43,17 @@ if [ -f "$STOCK_CONF" ]; then
         settings put global mobile_data_always_on "$STOCK_MOBILE_ALWAYS" 2>/dev/null || true
     fi
 
-    # Restore cellular network modes to stock auto
-    cmd phone set-allowed-network-types-for-users -s 0 11001111101111111111 >/dev/null 2>&1 || true
-    cmd phone set-allowed-network-types-for-users -s 1 11001111101111111111 >/dev/null 2>&1 || true
+    # Restore cellular network modes to stock baseline
+    if [ -n "$STOCK_TYPES_S0" ]; then
+        cmd phone set-allowed-network-types-for-users -s 0 "$STOCK_TYPES_S0" >/dev/null 2>&1 || true
+    else
+        cmd phone set-allowed-network-types-for-users -s 0 11001111101111111111 >/dev/null 2>&1 || true
+    fi
+    if [ -n "$STOCK_TYPES_S1" ]; then
+        cmd phone set-allowed-network-types-for-users -s 1 "$STOCK_TYPES_S1" >/dev/null 2>&1 || true
+    else
+        cmd phone set-allowed-network-types-for-users -s 1 11001111101111111111 >/dev/null 2>&1 || true
+    fi
 else
     # Fallback to safe standard defaults
     sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1 || true
@@ -52,11 +62,19 @@ else
     cmd phone set-allowed-network-types-for-users -s 0 11001111101111111111 >/dev/null 2>&1 || true
 fi
 
-# 3. Cleanup transient caches and temporary files
+# 3. Cleanup transient caches, tunnels, and DPI evasion iptables rules
 ip link del dev hypernet-warp >/dev/null 2>&1 || true
 ip route flush table 1337 >/dev/null 2>&1 || true
 ip rule del priority 9000 >/dev/null 2>&1 || true
 iptables -t nat -D POSTROUTING -o hypernet-warp -j MASQUERADE >/dev/null 2>&1 || true
+
+while iptables -t mangle -D POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1; do :; done
+while ip6tables -t mangle -D POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1; do :; done
+while iptables -t mangle -D POSTROUTING -p tcp --dport 80 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1; do :; done
+while ip6tables -t mangle -D POSTROUTING -p tcp --dport 80 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1; do :; done
+while iptables -D OUTPUT -p udp --dport 443 -j DROP >/dev/null 2>&1; do :; done
+while ip6tables -D OUTPUT -p udp --dport 443 -j DROP >/dev/null 2>&1; do :; done
+
 rm -f /data/local/tmp/hypernet* 2>/dev/null || true
 
 # 4. Remove module configuration and history

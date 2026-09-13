@@ -1,3 +1,11 @@
+/**
+ * HyperNet Standalone Speedtest Engine
+ * High-precision multi-stream network performance benchmarking.
+ * 
+ * Copyright (C) 2026 @itswill00
+ * Licensed under the GNU General Public License v3.0
+ */
+
 export class SpeedTestEngine {
   constructor() {
     this.abortController = null
@@ -28,7 +36,16 @@ export class SpeedTestEngine {
 
     const serverName = options.serverName || 'Cloudflare Anycast'
     const serverUrl = options.serverUrl || 'https://speed.cloudflare.com'
-    const durationSec = Math.max(3, options.durationSec || 4)
+    const serverHost = options.serverHost || (new URL(serverUrl)).hostname
+    const totalDuration = Math.max(4, Math.min(60, options.durationSec || 10))
+
+    // Allocate time proportionally:
+    // Ping: ~1.2s
+    // Download: ~58% of remaining
+    // Upload: ~42% of remaining
+    const remainingTime = Math.max(2.5, totalDuration - 1.2)
+    const downloadDurationSec = Math.max(2.0, Math.round(remainingTime * 0.58 * 10) / 10)
+    const uploadDurationSec = Math.max(1.5, Math.round(remainingTime * 0.42 * 10) / 10)
 
     const safeProgress = (data) => {
       if (this.currentRunId !== runId || signal.aborted) return
@@ -37,17 +54,33 @@ export class SpeedTestEngine {
 
     const result = {
       ping: 0,
+      minPing: 0,
+      maxPing: 0,
       jitter: 0,
+      loadedPing: 0,
+      loadedPingDl: 0,
+      loadedPingUl: 0,
+      bufferbloatDelta: 0,
+      bufferbloatGrade: 'N/A',
       download: 0,
       upload: 0,
+      downloadBytes: 0,
+      uploadBytes: 0,
+      bytesTransferred: 0,
+      bytesUsedMb: 0,
+      durationSec: totalDuration,
       server: serverName,
-      bytesTransferred: 0
+      serverHost: serverHost,
+      timestamp: Date.now()
     }
 
     const graphPoints = []
+    const overallStartTime = performance.now()
 
     try {
-      // 1. Latency & Jitter Measurement Phase (~1.2s)
+      // -----------------------------------------------------------
+      // Phase 1: Idle Latency & Jitter Measurement (~1.2s)
+      // -----------------------------------------------------------
       safeProgress({
         phase: 'ping',
         speedMbps: 0,
@@ -61,7 +94,9 @@ export class SpeedTestEngine {
       })
 
       const pingSamples = []
-      for (let i = 0; i < 3; i++) {
+      const probeCount = Math.min(8, Math.max(4, Math.round(totalDuration * 0.6)))
+      
+      for (let i = 0; i < probeCount; i++) {
         if (signal.aborted || this.currentRunId !== runId) return null
         const start = performance.now()
         try {
@@ -70,11 +105,14 @@ export class SpeedTestEngine {
             signal
           })
           const rtt = Math.round((performance.now() - start) * 10) / 10
-          pingSamples.push(rtt)
+          if (rtt > 0) {
+            pingSamples.push(rtt)
+          }
+          const progressPct = 5 + Math.round(((i + 1) / probeCount) * 10)
           safeProgress({
             phase: 'ping',
             speedMbps: 0,
-            progressPct: 5 + (i + 1) * 3,
+            progressPct,
             pingMs: rtt,
             jitterMs: 0,
             downloadMbps: 0,
@@ -85,11 +123,13 @@ export class SpeedTestEngine {
         } catch (e) {
           if (signal.aborted) return null
         }
-        await new Promise(r => setTimeout(r, 80))
+        await new Promise(r => setTimeout(r, 60))
       }
 
       if (pingSamples.length > 0) {
         pingSamples.sort((a, b) => a - b)
+        result.minPing = pingSamples[0]
+        result.maxPing = pingSamples[pingSamples.length - 1]
         const avg = pingSamples.reduce((sum, v) => sum + v, 0) / pingSamples.length
         let jitterSum = 0
         for (let i = 1; i < pingSamples.length; i++) {
@@ -97,9 +137,6 @@ export class SpeedTestEngine {
         }
         result.ping = Math.round(avg * 10) / 10
         result.jitter = Math.round((jitterSum / Math.max(1, pingSamples.length - 1)) * 10) / 10
-      } else {
-        result.ping = 36.5
-        result.jitter = 1.2
       }
 
       safeProgress({
@@ -114,7 +151,9 @@ export class SpeedTestEngine {
         graphPoints: []
       })
 
-      // 2. Multi-Stream Download Phase (~3.5s)
+      // -----------------------------------------------------------
+      // Phase 2: Multi-Stream Download with Loaded Latency Probe
+      // -----------------------------------------------------------
       safeProgress({
         phase: 'download',
         speedMbps: 0,
@@ -131,7 +170,22 @@ export class SpeedTestEngine {
       let lastBytes = 0
       let lastTime = performance.now()
       const downloadStartTime = performance.now()
-      const downloadEndTime = downloadStartTime + (durationSec * 1000)
+      const downloadEndTime = downloadStartTime + (downloadDurationSec * 1000)
+
+      const dlPingSamples = []
+      const dlPingInterval = setInterval(async () => {
+        if (signal.aborted || this.currentRunId !== runId || performance.now() >= downloadEndTime) {
+          clearInterval(dlPingInterval)
+          return
+        }
+        const t0 = performance.now()
+        try {
+          await fetch(`${serverUrl}/__down?bytes=0&_lp=${Date.now()}`, { cache: 'no-store', signal })
+          const rtt = performance.now() - t0
+          if (rtt > 0 && rtt < 4000) dlPingSamples.push(rtt)
+        } catch {}
+      }, 700)
+      this.activeIntervals.push(dlPingInterval)
 
       const downloadWorker = async (chunkBytes) => {
         while (performance.now() < downloadEndTime && !signal.aborted && this.currentRunId === runId) {
@@ -155,7 +209,7 @@ export class SpeedTestEngine {
             }
           } catch (e) {
             if (signal.aborted) break
-            await new Promise(r => setTimeout(r, 100))
+            await new Promise(r => setTimeout(r, 80))
           }
         }
       }
@@ -177,7 +231,7 @@ export class SpeedTestEngine {
           lastTime = now
 
           const elapsedSec = (now - downloadStartTime) / 1000
-          const progressPct = Math.min(60, 15 + Math.round((elapsedSec / durationSec) * 45))
+          const progressPct = Math.min(60, 15 + Math.round((elapsedSec / downloadDurationSec) * 45))
           graphPoints.push(Math.round(currentInstantMbps * 10) / 10)
 
           safeProgress({
@@ -204,15 +258,26 @@ export class SpeedTestEngine {
 
       await Promise.all(downWorkers)
       clearInterval(downInterval)
+      clearInterval(dlPingInterval)
 
       if (signal.aborted || this.currentRunId !== runId) return null
 
-      const totalDownloadTimeSec = (performance.now() - downloadStartTime) / 1000
-      result.download = Math.round(((totalDownloadBytes * 8) / (Math.max(0.5, totalDownloadTimeSec) * 1000000)) * 10) / 10
-      if (result.download <= 0) result.download = Math.round((currentInstantMbps || 45.0) * 10) / 10
+      const actualDownloadSec = (performance.now() - downloadStartTime) / 1000
+      if (totalDownloadBytes > 0 && actualDownloadSec > 0.1) {
+        result.download = Math.round(((totalDownloadBytes * 8) / (actualDownloadSec * 1000000)) * 10) / 10
+      } else {
+        result.download = Math.round(currentInstantMbps * 10) / 10
+      }
+      result.downloadBytes = totalDownloadBytes
       result.bytesTransferred += totalDownloadBytes
 
-      // 3. Multi-Stream Upload Phase (~2.5s)
+      if (dlPingSamples.length > 0) {
+        result.loadedPingDl = Math.round((dlPingSamples.reduce((a, b) => a + b, 0) / dlPingSamples.length) * 10) / 10
+      }
+
+      // -----------------------------------------------------------
+      // Phase 3: Multi-Stream Upload with Loaded Latency Probe
+      // -----------------------------------------------------------
       safeProgress({
         phase: 'upload',
         speedMbps: 0,
@@ -225,13 +290,27 @@ export class SpeedTestEngine {
         graphPoints: [...graphPoints]
       })
 
-      const uploadDurationSec = Math.max(2, durationSec * 0.75)
       let totalUploadBytes = 0
       let lastUploadBytes = 0
       let lastUploadTime = performance.now()
       const uploadStartTime = performance.now()
       const uploadEndTime = uploadStartTime + (uploadDurationSec * 1000)
       const uploadChunk = new Uint8Array(1024 * 256) // 256KB chunk
+
+      const ulPingSamples = []
+      const ulPingInterval = setInterval(async () => {
+        if (signal.aborted || this.currentRunId !== runId || performance.now() >= uploadEndTime) {
+          clearInterval(ulPingInterval)
+          return
+        }
+        const t0 = performance.now()
+        try {
+          await fetch(`${serverUrl}/__down?bytes=0&_lp=${Date.now()}`, { cache: 'no-store', signal })
+          const rtt = performance.now() - t0
+          if (rtt > 0 && rtt < 4000) ulPingSamples.push(rtt)
+        } catch {}
+      }, 700)
+      this.activeIntervals.push(ulPingInterval)
 
       const uploadWorker = async () => {
         while (performance.now() < uploadEndTime && !signal.aborted && this.currentRunId === runId) {
@@ -247,7 +326,7 @@ export class SpeedTestEngine {
             }
           } catch (e) {
             if (signal.aborted) break
-            await new Promise(r => setTimeout(r, 80))
+            await new Promise(r => setTimeout(r, 60))
           }
         }
       }
@@ -294,15 +373,45 @@ export class SpeedTestEngine {
 
       await Promise.all(upWorkers)
       clearInterval(upInterval)
+      clearInterval(ulPingInterval)
 
       if (signal.aborted || this.currentRunId !== runId) return null
 
-      const totalUploadTimeSec = (performance.now() - uploadStartTime) / 1000
-      result.upload = Math.round(((totalUploadBytes * 8) / (Math.max(0.5, totalUploadTimeSec) * 1000000)) * 10) / 10
-      if (result.upload <= 0) result.upload = Math.round((currentInstantUploadMbps || result.download * 0.55) * 10) / 10
+      const actualUploadSec = (performance.now() - uploadStartTime) / 1000
+      if (totalUploadBytes > 0 && actualUploadSec > 0.1) {
+        result.upload = Math.round(((totalUploadBytes * 8) / (actualUploadSec * 1000000)) * 10) / 10
+      } else {
+        result.upload = Math.round(currentInstantUploadMbps * 10) / 10
+      }
+      result.uploadBytes = totalUploadBytes
       result.bytesTransferred += totalUploadBytes
+      result.bytesUsedMb = Math.round((result.bytesTransferred / 1048576) * 10) / 10
 
-      // 4. Final Completion
+      if (ulPingSamples.length > 0) {
+        result.loadedPingUl = Math.round((ulPingSamples.reduce((a, b) => a + b, 0) / ulPingSamples.length) * 10) / 10
+      }
+
+      // -----------------------------------------------------------
+      // Phase 4: Bufferbloat Calculation & Final Synthesis
+      // -----------------------------------------------------------
+      const loadedCandidates = [result.loadedPingDl, result.loadedPingUl].filter(v => v > 0)
+      if (loadedCandidates.length > 0) {
+        result.loadedPing = Math.round((loadedCandidates.reduce((a, b) => a + b, 0) / loadedCandidates.length) * 10) / 10
+        result.bufferbloatDelta = Math.max(0, Math.round((result.loadedPing - result.ping) * 10) / 10)
+        
+        if (result.bufferbloatDelta <= 5) result.bufferbloatGrade = 'A+ (Minimal)'
+        else if (result.bufferbloatDelta <= 15) result.bufferbloatGrade = 'A (Low)'
+        else if (result.bufferbloatDelta <= 30) result.bufferbloatGrade = 'B (Moderate)'
+        else if (result.bufferbloatDelta <= 60) result.bufferbloatGrade = 'C (Degraded)'
+        else result.bufferbloatGrade = 'D (High)'
+      } else {
+        result.loadedPing = result.ping
+        result.bufferbloatGrade = 'A'
+      }
+
+      const totalElapsedSec = (performance.now() - overallStartTime) / 1000
+      result.durationSec = Math.round(totalElapsedSec * 10) / 10
+
       safeProgress({
         phase: 'complete',
         speedMbps: 0,
@@ -312,7 +421,8 @@ export class SpeedTestEngine {
         downloadMbps: result.download,
         uploadMbps: result.upload,
         bytesTransferred: result.bytesTransferred,
-        graphPoints: [...graphPoints]
+        graphPoints: [...graphPoints],
+        result
       })
 
       this.isRunning = false

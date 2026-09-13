@@ -131,6 +131,25 @@
             </div>
           </div>
 
+          <!-- Duration Selector -->
+          <div style="display: flex; flex-direction: column; gap: 6px;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <span style="font-size: 11px; color: var(--on-surface-variant); font-weight: 500;">Test duration</span>
+              <span style="font-size: 10.5px; color: var(--primary); font-weight: 500;">{{ selectedDuration }}s {{ durationLabel(selectedDuration) }}</span>
+            </div>
+            <div class="duration-chips">
+              <div
+                v-for="d in durationPresets"
+                :key="d.sec"
+                class="duration-chip"
+                :class="{ active: selectedDuration === d.sec }"
+                @click="setDuration(d.sec)"
+              >
+                {{ d.label }}
+              </div>
+            </div>
+          </div>
+
           <!-- Primary Action Button -->
           <button
             class="btn btn-block"
@@ -138,8 +157,37 @@
             @click="toggleSpeedtest"
           >
             <Icons :name="speedtestState.isTesting ? 'stop' : 'play'" :size="14" />
-            <span>{{ speedtestState.isTesting ? 'Stop test' : 'Start speedtest' }}</span>
+            <span>{{ speedtestState.isTesting ? 'Stop test' : `Start ${selectedDuration}s speedtest` }}</span>
           </button>
+        </section>
+
+        <!-- Link Performance Analysis Card -->
+        <section class="md3-card" v-if="speedtestState.lastTestedAt || speedtestState.download > 0">
+          <div class="card-title-row">
+            <span class="card-title">
+              <Icons name="zap" :size="13" />
+              <span>Link performance analysis</span>
+            </span>
+            <span class="badge-pill active">{{ speedtestState.bufferbloatGrade || 'Optimal' }}</span>
+          </div>
+          <div class="speed-details-grid">
+            <div class="speed-detail-cell">
+              <span class="speed-detail-label">Latency range</span>
+              <span class="speed-detail-val">{{ speedtestState.minPing || speedtestState.ping }} - {{ speedtestState.maxPing || speedtestState.ping }} ms</span>
+            </div>
+            <div class="speed-detail-cell">
+              <span class="speed-detail-label">Bufferbloat delta</span>
+              <span class="speed-detail-val">+{{ speedtestState.bufferbloatDelta || 0 }} ms</span>
+            </div>
+            <div class="speed-detail-cell">
+              <span class="speed-detail-label">Payload transferred</span>
+              <span class="speed-detail-val">{{ speedtestState.bytesUsedMb ? speedtestState.bytesUsedMb.toFixed(1) : '0.0' }} MB</span>
+            </div>
+            <div class="speed-detail-cell">
+              <span class="speed-detail-label">Benchmark duration</span>
+              <span class="speed-detail-val">{{ speedtestState.durationSec || selectedDuration }}s</span>
+            </div>
+          </div>
         </section>
 
         <!-- Recent Results Card -->
@@ -147,12 +195,12 @@
           <div class="card-title-row">
             <span class="card-title">
               <Icons name="clock" :size="13" />
-              <span>Recent results</span>
+              <span>Recent results ({{ speedHistory.length }})</span>
             </span>
             <button class="btn btn-sm btn-secondary" @click="clearHistory">Clear</button>
           </div>
           <div class="history-list">
-            <div v-for="(h, idx) in speedHistory.slice(0, 4)" :key="idx" class="history-card">
+            <div v-for="(h, idx) in speedHistory.slice(0, 5)" :key="idx" class="history-card" @click="showHistoryDetail(h)" style="cursor: pointer;">
               <div class="history-top">
                 <div class="history-speeds">
                   <span class="speed-down">↓ {{ h.download }}</span>
@@ -160,10 +208,17 @@
                   <span class="speed-up">↑ {{ h.upload }}</span>
                   <span class="speed-unit">Mbps</span>
                 </div>
-                <span class="history-ping">{{ h.ping }} ms</span>
+                <div style="display: flex; align-items: center; gap: 6px;">
+                  <span v-if="h.bufferbloatGrade" class="badge-pill" style="padding: 1px 6px; font-size: 9.5px;">{{ h.bufferbloatGrade }}</span>
+                  <span class="history-ping">{{ h.ping }} ms</span>
+                </div>
               </div>
               <div class="history-bottom">
                 <span>{{ h.date }}</span>
+                <span>•</span>
+                <span>{{ h.durationSec || 10 }}s</span>
+                <span>•</span>
+                <span>{{ h.bytesUsedMb ? h.bytesUsedMb.toFixed(1) + ' MB' : '' }}</span>
                 <span>•</span>
                 <span class="truncate-text">{{ h.server }}</span>
               </div>
@@ -628,7 +683,7 @@
           <div class="switch-row" style="margin-top: 2px;">
             <div class="switch-label-col">
               <span class="switch-title">Deep packet inspection (DPI) evasion</span>
-              <span class="switch-desc">Splits TLS ClientHello across TCP segments (MSS 160) to bypass ISP SNI filtering (Reddit, Vimeo) without a VPN</span>
+              <span class="switch-desc">Splits TLS ClientHello across TCP segments (MSS 536) to bypass ISP SNI filtering (Reddit, Vimeo) without a VPN</span>
             </div>
             <label class="md3-switch">
               <input
@@ -940,7 +995,7 @@ function formatRamInstalled(mb, gb) {
   if (gb && gb > 0) return gb
   if (!mb || mb <= 0) return 0
   const raw = Math.round((mb + 650) / 1024)
-  const tiers = [1, 2, 3, 4, 6, 8, 12, 16, 24]
+  const tiers = [1, 2, 3, 4, 6, 8, 12, 16, 18, 24, 32]
   for (const t of tiers) {
     if (Math.abs(raw - t) <= 1 && raw <= t) return t
   }
@@ -1110,16 +1165,51 @@ function toggleServerSelect() {
   showToast(`Switched server to ${selectedServer.value.name}`)
 }
 
+const durationPresets = [
+  { sec: 5, label: '5s' },
+  { sec: 10, label: '10s' },
+  { sec: 15, label: '15s' },
+  { sec: 30, label: '30s' }
+]
+const selectedDuration = ref(parseInt(localStorage.getItem('hypernet_speedtest_duration') || '10', 10))
+
+function setDuration(sec) {
+  selectedDuration.value = sec
+  localStorage.setItem('hypernet_speedtest_duration', sec.toString())
+}
+
+function durationLabel(sec) {
+  if (sec <= 5) return 'Quick'
+  if (sec <= 10) return 'Standard'
+  if (sec <= 15) return 'Thorough'
+  return 'Sustained'
+}
+
+function showHistoryDetail(h) {
+  modalState.title = `Benchmark Results (${h.date})`
+  modalState.desc = `Server: ${h.server || 'Anycast'}\nDownload: ${h.download} Mbps\nUpload: ${h.upload} Mbps\nPing: ${h.ping} ms (min ${h.minPing || h.ping}, max ${h.maxPing || h.ping} ms, jitter ±${h.jitter || 0} ms)\nBufferbloat: ${h.bufferbloatGrade ? h.bufferbloatGrade + ' (+' + (h.bufferbloatDelta || 0) + ' ms)' : 'Optimal'}\nPayload: ${h.bytesUsedMb ? h.bytesUsedMb.toFixed(1) + ' MB' : '--'}\nDuration: ${h.durationSec || 10}s`
+  modalAction = null
+  modalState.visible = true
+}
+
 const speedtestState = reactive({
   isTesting: false,
   phase: 'idle',
   instantSpeed: 0,
   progressPct: 0,
   ping: 0,
+  minPing: 0,
+  maxPing: 0,
   jitter: 0,
+  loadedPing: 0,
+  bufferbloatDelta: 0,
+  bufferbloatGrade: '',
   download: 0,
   upload: 0,
   bytesUsedMb: 0,
+  downloadMb: 0,
+  uploadMb: 0,
+  durationSec: 10,
   lastTestedAt: null,
   graphPoints: []
 })
@@ -1135,7 +1225,7 @@ function loadHistory() {
 
 function saveHistory(item) {
   speedHistory.value.unshift(item)
-  if (speedHistory.value.length > 20) speedHistory.value.pop()
+  if (speedHistory.value.length > 25) speedHistory.value.pop()
   try {
     localStorage.setItem('hypernet_speed_history', JSON.stringify(speedHistory.value))
   } catch {}
@@ -1195,7 +1285,12 @@ async function toggleSpeedtest() {
   speedtestState.download = 0
   speedtestState.upload = 0
   speedtestState.ping = 0
+  speedtestState.minPing = 0
+  speedtestState.maxPing = 0
   speedtestState.jitter = 0
+  speedtestState.loadedPing = 0
+  speedtestState.bufferbloatDelta = 0
+  speedtestState.bufferbloatGrade = ''
   speedtestState.bytesUsedMb = 0
   speedtestState.graphPoints = []
 
@@ -1204,7 +1299,7 @@ async function toggleSpeedtest() {
       serverUrl: selectedServer.value.url,
       serverName: selectedServer.value.name,
       serverId: selectedServer.value.id,
-      durationSec: 4
+      durationSec: selectedDuration.value
     }, (progress) => {
       if (!speedtestState.isTesting) return
       speedtestState.phase = progress.phase
@@ -1220,14 +1315,30 @@ async function toggleSpeedtest() {
 
     if (res && speedtestState.isTesting) {
       speedtestState.lastTestedAt = Date.now()
+      speedtestState.minPing = res.minPing
+      speedtestState.maxPing = res.maxPing
+      speedtestState.loadedPing = res.loadedPing
+      speedtestState.bufferbloatDelta = res.bufferbloatDelta
+      speedtestState.bufferbloatGrade = res.bufferbloatGrade
+      speedtestState.downloadMb = res.downloadBytes ? Math.round((res.downloadBytes / 1048576) * 10) / 10 : 0
+      speedtestState.uploadMb = res.uploadBytes ? Math.round((res.uploadBytes / 1048576) * 10) / 10 : 0
+      speedtestState.durationSec = res.durationSec
       saveHistory({
         date: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         download: res.download,
         upload: res.upload,
         ping: res.ping,
+        minPing: res.minPing,
+        maxPing: res.maxPing,
+        jitter: res.jitter,
+        loadedPing: res.loadedPing,
+        bufferbloatDelta: res.bufferbloatDelta,
+        bufferbloatGrade: res.bufferbloatGrade,
+        bytesUsedMb: res.bytesUsedMb,
+        durationSec: res.durationSec,
         server: res.server
       })
-      showToast('Speedtest completed')
+      showToast(`Speedtest finished (${res.download} ↓ / ${res.upload} ↑ Mbps)`)
     }
   } catch (err) {
     if (speedtestState.phase !== 'cancelled') {

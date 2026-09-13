@@ -40,7 +40,7 @@
 static int is_safe_input(const char *str) {
     if (!str || !*str) return 0;
     while (*str) {
-        if (!isalnum(*str) && *str != '.' && *str != '-' && *str != '_' && *str != ':') {
+        if (!isalnum((unsigned char)*str) && *str != '.' && *str != '-' && *str != '_' && *str != ':') {
             return 0;
         }
         str++;
@@ -84,7 +84,7 @@ static int read_sysfs_line(const char *path, char *buf, size_t max_len) {
     }
     fclose(f);
     char *p = buf + strlen(buf) - 1;
-    while (p >= buf && (*p == '\n' || *p == '\r' || isspace(*p))) {
+    while (p >= buf && (*p == '\n' || *p == '\r' || isspace((unsigned char)*p))) {
         *p = '\0';
         p--;
     }
@@ -101,9 +101,32 @@ static int read_cmd_line(const char *cmd, char *buf, size_t max_len) {
     }
     pclose(p);
     char *end = buf + strlen(buf) - 1;
-    while (end >= buf && (*end == '\n' || *end == '\r' || isspace(*end))) {
+    while (end >= buf && (*end == '\n' || *end == '\r' || isspace((unsigned char)*end))) {
         *end = '\0';
         end--;
+    }
+    return 0;
+}
+
+/* Clean prop string by stripping whitespace, quotes, and dangling commas */
+static void clean_prop_val(char *val) {
+    if (!val) return;
+    char *p = val;
+    while (*p && (isspace((unsigned char)*p) || *p == ',' || *p == '"')) p++;
+    if (p != val) memmove(val, p, strlen(p) + 1);
+    char *end = val + strlen(val) - 1;
+    while (end >= val && (isspace((unsigned char)*end) || *end == ',' || *end == '"')) {
+        *end = '\0';
+        end--;
+    }
+}
+
+/* Check if a string is a valid operator name */
+static int is_valid_op_name(const char *name) {
+    if (!name || !*name) return 0;
+    if (strcmp(name, "null") == 0 || strcmp(name, "unknown") == 0 || strcmp(name, ",") == 0) return 0;
+    for (const char *c = name; *c; c++) {
+        if (isalnum((unsigned char)*c)) return 1;
     }
     return 0;
 }
@@ -141,7 +164,7 @@ static int cmd_traffic(void) {
         *colon = '\0';
 
         char *ifname = line;
-        while (isspace(*ifname)) ifname++;
+        while (isspace((unsigned char)*ifname)) ifname++;
 
         /* Filter out loopback */
         if (strcmp(ifname, "lo") == 0) continue;
@@ -150,7 +173,6 @@ static int cmd_traffic(void) {
         unsigned long long tx_bytes = 0, tx_pkts = 0;
         unsigned long long dummy = 0;
 
-        /* Format: rx_bytes rx_packets rx_errs rx_drop rx_fifo rx_frame rx_compressed rx_multicast tx_bytes tx_packets ... */
         int parsed = sscanf(colon + 1, "%llu %llu %llu %llu %llu %llu %llu %llu %llu %llu",
                             &rx_bytes, &rx_pkts, &dummy, &dummy, &dummy, &dummy, &dummy, &dummy,
                             &tx_bytes, &tx_pkts);
@@ -168,7 +190,7 @@ static int cmd_traffic(void) {
     return 0;
 }
 
-/* Parse Wi-Fi details from cmd wifi status */
+/* Parse Wi-Fi details with dynamic interface detection */
 static void get_wifi_details(int *out_rssi, int *out_speed) {
     FILE *p = popen("cmd wifi status 2>/dev/null", "r");
     char ssid[128] = "unknown";
@@ -190,7 +212,7 @@ static void get_wifi_details(int *out_rssi, int *out_speed) {
             if (strstr(line, "Wifi is connected")) {
                 is_connected = 1;
             }
-            /* Only parse from the authoritative WifiInfo line */
+            /* Parse from authoritative WifiInfo line */
             if (strstr(line, "WifiInfo:")) {
                 is_enabled = 1;
                 is_connected = 1;
@@ -204,7 +226,21 @@ static void get_wifi_details(int *out_rssi, int *out_speed) {
                         strncpy(ssid, s, len);
                         ssid[len] = '\0';
                     }
+                } else {
+                    char *s_noquote = strstr(line, "SSID: ");
+                    if (s_noquote) {
+                        s_noquote += 6;
+                        char *comma = strchr(s_noquote, ',');
+                        if (comma) {
+                            int len = comma - s_noquote;
+                            if (len > (int)sizeof(ssid) - 1) len = sizeof(ssid) - 1;
+                            strncpy(ssid, s_noquote, len);
+                            ssid[len] = '\0';
+                            clean_prop_val(ssid);
+                        }
+                    }
                 }
+
                 char *b = strstr(line, "BSSID: ");
                 if (b) {
                     b += 7;
@@ -248,37 +284,44 @@ static void get_wifi_details(int *out_rssi, int *out_speed) {
         pclose(p);
     }
 
-    /* Universal fallback: check interface state and route */
-    if (!is_connected) {
-        char oper[32] = "";
-        read_sysfs_line("/sys/class/net/wlan0/operstate", oper, sizeof(oper));
-        if (strcmp(oper, "up") == 0) {
-            is_enabled = 1;
-            is_connected = 1;
-        }
+    /* Universal dynamic fallback: check route and discover active Wi-Fi interface */
+    char active_wlan[32] = "wlan0";
+    char wlan_route[64] = "";
+    read_cmd_line("ip route get 1.1.1.1 2>/dev/null | grep -o 'dev wlan[0-9]*' | head -n1 | cut -d' ' -f2", wlan_route, sizeof(wlan_route));
+    if (wlan_route[0] != '\0') {
+        strncpy(active_wlan, wlan_route, sizeof(active_wlan) - 1);
+        is_enabled = 1;
+        is_connected = 1;
+    }
 
-        char wlan_route[64] = "";
-        read_cmd_line("ip route get 1.1.1.1 2>/dev/null | grep -o 'dev wlan[0-9]*' | head -n1", wlan_route, sizeof(wlan_route));
-        if (wlan_route[0] != '\0') {
-            is_enabled = 1;
-            is_connected = 1;
-        }
+    char oper_path[128];
+    snprintf(oper_path, sizeof(oper_path), "/sys/class/net/%s/operstate", active_wlan);
+    char oper[32] = "";
+    read_sysfs_line(oper_path, oper, sizeof(oper));
+    if (strcmp(oper, "up") == 0) {
+        is_enabled = 1;
+        is_connected = 1;
+    }
 
+    if (is_connected && ip[0] == '\0') {
+        char wlan_cmd[128];
+        snprintf(wlan_cmd, sizeof(wlan_cmd), "ip -4 addr show %s 2>/dev/null | grep -m1 'inet '", active_wlan);
         char wlan_info[256] = "";
-        read_cmd_line("ip -4 addr show wlan0 2>/dev/null | grep -m1 'inet '", wlan_info, sizeof(wlan_info));
+        read_cmd_line(wlan_cmd, wlan_info, sizeof(wlan_info));
         if (wlan_info[0] != '\0') {
-            is_enabled = 1;
-            is_connected = 1;
             char *inet_ptr = strstr(wlan_info, "inet ");
-            if (inet_ptr && ip[0] == '\0') {
+            if (inet_ptr) {
                 sscanf(inet_ptr + 5, "%63[^/ ]", ip);
             }
         }
     }
 
     /* Fallback SSID extraction if still unknown */
-    if (is_connected && strcmp(ssid, "unknown") == 0) {
+    if (is_connected && (strcmp(ssid, "unknown") == 0 || strcmp(ssid, "<unknown ssid>") == 0)) {
         read_cmd_line("dumpsys wifi 2>/dev/null | grep -m1 'mWifiInfo SSID: \"' | sed -n 's/.*SSID: \"\\([^\"]*\\)\".*/\\1/p'", ssid, sizeof(ssid));
+        if (strcmp(ssid, "unknown") == 0 || strlen(ssid) == 0) {
+            read_cmd_line("dumpsys connectivity 2>/dev/null | grep -m1 'WIFI.*extra: \"' | sed -n 's/.*extra: \"\\([^\"]*\\)\".*/\\1/p'", ssid, sizeof(ssid));
+        }
     }
 
     const char *band = "unknown";
@@ -303,7 +346,7 @@ static void get_wifi_details(int *out_rssi, int *out_speed) {
     if (out_speed) *out_speed = is_connected ? link_speed : 0;
 }
 
-/* Accurate Physical RAM Sizing (accounts for kernel/hardware reservations) */
+/* Accurate Physical RAM Sizing (accounts for kernel/hardware carveouts) */
 static int get_physical_ram_gb(int mem_total_mb) {
     if (mem_total_mb <= 0) return 0;
     int raw = (mem_total_mb + 650) / 1024;
@@ -315,11 +358,13 @@ static int get_physical_ram_gb(int mem_total_mb) {
     if (raw <= 8) return 8;
     if (raw <= 12) return 12;
     if (raw <= 16) return 16;
+    if (raw <= 18) return 18;
     if (raw <= 24) return 24;
+    if (raw <= 32) return 32;
     return raw;
 }
 
-/* Device Hardware & Platform Intelligence */
+/* Device Hardware & Multi-Platform Intelligence */
 static void get_device_details(char *out_tier, size_t tier_len) {
     char brand[64] = "unknown";
     char model[64] = "unknown";
@@ -327,11 +372,15 @@ static void get_device_details(char *out_tier, size_t tier_len) {
     char release[32] = "unknown";
     char sdk[16] = "0";
 
-    read_cmd_line("getprop ro.product.brand 2>/dev/null", brand, sizeof(brand));
-    read_cmd_line("getprop ro.product.model 2>/dev/null", model, sizeof(model));
-    read_cmd_line("getprop ro.board.platform 2>/dev/null || getprop ro.soc.manufacturer 2>/dev/null", platform, sizeof(platform));
+    read_cmd_line("getprop ro.product.brand 2>/dev/null || getprop ro.product.manufacturer 2>/dev/null || getprop ro.product.vendor.brand 2>/dev/null", brand, sizeof(brand));
+    read_cmd_line("getprop ro.product.model 2>/dev/null || getprop ro.product.marketname 2>/dev/null || getprop ro.product.vendor.model 2>/dev/null", model, sizeof(model));
+    read_cmd_line("getprop ro.board.platform 2>/dev/null || getprop ro.soc.model 2>/dev/null || getprop ro.hardware 2>/dev/null || getprop ro.chipname 2>/dev/null || getprop ro.soc.manufacturer 2>/dev/null", platform, sizeof(platform));
     read_cmd_line("getprop ro.build.version.release 2>/dev/null", release, sizeof(release));
     read_cmd_line("getprop ro.build.version.sdk 2>/dev/null", sdk, sizeof(sdk));
+
+    clean_prop_val(brand);
+    clean_prop_val(model);
+    clean_prop_val(platform);
 
     /* Parse RAM from /proc/meminfo */
     unsigned long mem_total_kb = 0;
@@ -430,16 +479,12 @@ static void get_all_sim_and_cellular_details(SimSlotInfo slots[2], int *out_acti
     }
 
     char sim_states[64] = "absent,absent";
-    char sim_ops[128] = "";
-    char sim_orig_ops[128] = "";
     char active_sub[16] = "1";
     char prop_types[128] = "";
 
     read_cmd_line("getprop gsm.sim.state 2>/dev/null", sim_states, sizeof(sim_states));
-    read_cmd_line("getprop gsm.operator.orig.alpha 2>/dev/null", sim_orig_ops, sizeof(sim_orig_ops));
-    read_cmd_line("getprop gsm.sim.operator.alpha 2>/dev/null", sim_ops, sizeof(sim_ops));
     read_cmd_line("getprop gsm.network.type 2>/dev/null", prop_types, sizeof(prop_types));
-    read_cmd_line("settings get global multi_sim_data_call 2>/dev/null", active_sub, sizeof(active_sub));
+    read_cmd_line("settings get global multi_sim_data_call 2>/dev/null || settings get global user_preferred_data_sub 2>/dev/null", active_sub, sizeof(active_sub));
 
     /* Parse gsm.sim.state */
     char *comma = strchr(sim_states, ',');
@@ -452,6 +497,7 @@ static void get_all_sim_and_cellular_details(SimSlotInfo slots[2], int *out_acti
     }
 
     for (int i = 0; i < 2; i++) {
+        clean_prop_val(slots[i].state);
         for (char *c = slots[i].state; *c; c++) *c = (char)tolower((unsigned char)*c);
         if (strcmp(slots[i].state, "loaded") == 0 ||
             strcmp(slots[i].state, "ready") == 0 ||
@@ -462,24 +508,51 @@ static void get_all_sim_and_cellular_details(SimSlotInfo slots[2], int *out_acti
         }
     }
 
-    /* Operator names from properties */
-    char *op_source = strlen(sim_orig_ops) > 0 ? sim_orig_ops : sim_ops;
-    comma = strchr(op_source, ',');
-    if (comma) {
-        *comma = '\0';
-        strncpy(slots[0].operator_name, op_source, sizeof(slots[0].operator_name) - 1);
-        strncpy(slots[1].operator_name, comma + 1, sizeof(slots[1].operator_name) - 1);
-    } else {
-        strncpy(slots[0].operator_name, op_source, sizeof(slots[0].operator_name) - 1);
+    /* Robust multi-tiered Operator Name extraction */
+    const char *op_props[] = {
+        "gsm.sim.operator.alpha",
+        "gsm.operator.alpha",
+        "gsm.operator.orig.alpha",
+        NULL
+    };
+    for (int p_idx = 0; op_props[p_idx] != NULL; p_idx++) {
+        char raw[128] = "";
+        char cmd[128];
+        snprintf(cmd, sizeof(cmd), "getprop %s 2>/dev/null", op_props[p_idx]);
+        if (read_cmd_line(cmd, raw, sizeof(raw)) == 0 && strlen(raw) > 0) {
+            char op0[64] = "", op1[64] = "";
+            char *cm = strchr(raw, ',');
+            if (cm) {
+                *cm = '\0';
+                strncpy(op0, raw, sizeof(op0) - 1);
+                strncpy(op1, cm + 1, sizeof(op1) - 1);
+            } else {
+                strncpy(op0, raw, sizeof(op0) - 1);
+            }
+            clean_prop_val(op0);
+            clean_prop_val(op1);
+            if (!is_valid_op_name(slots[0].operator_name) && is_valid_op_name(op0)) {
+                strncpy(slots[0].operator_name, op0, sizeof(slots[0].operator_name) - 1);
+            }
+            if (!is_valid_op_name(slots[1].operator_name) && is_valid_op_name(op1)) {
+                strncpy(slots[1].operator_name, op1, sizeof(slots[1].operator_name) - 1);
+            }
+        }
     }
 
-    /* Fallbacks for slot 1 operator */
-    if (strlen(slots[1].operator_name) == 0) {
-        char op2[64] = "";
-        if (read_cmd_line("getprop gsm.sim.operator.alpha.2 2>/dev/null", op2, sizeof(op2)) == 0 && strlen(op2) > 0) {
-            strncpy(slots[1].operator_name, op2, sizeof(slots[1].operator_name) - 1);
-        } else if (read_cmd_line("getprop gsm.operator.alpha.2 2>/dev/null", op2, sizeof(op2)) == 0 && strlen(op2) > 0) {
-            strncpy(slots[1].operator_name, op2, sizeof(slots[1].operator_name) - 1);
+    /* Slot-specific property fallbacks */
+    if (!is_valid_op_name(slots[0].operator_name)) {
+        char op[64] = "";
+        if (read_cmd_line("getprop gsm.sim.operator.alpha.0 2>/dev/null", op, sizeof(op)) == 0) {
+            clean_prop_val(op);
+            if (is_valid_op_name(op)) strncpy(slots[0].operator_name, op, sizeof(slots[0].operator_name) - 1);
+        }
+    }
+    if (!is_valid_op_name(slots[1].operator_name)) {
+        char op[64] = "";
+        if (read_cmd_line("getprop gsm.sim.operator.alpha.1 2>/dev/null || getprop gsm.sim.operator.alpha.2 2>/dev/null || getprop gsm.operator.alpha.2 2>/dev/null", op, sizeof(op)) == 0) {
+            clean_prop_val(op);
+            if (is_valid_op_name(op)) strncpy(slots[1].operator_name, op, sizeof(slots[1].operator_name) - 1);
         }
     }
 
@@ -500,13 +573,14 @@ static void get_all_sim_and_cellular_details(SimSlotInfo slots[2], int *out_acti
     if (sub >= 2) active_slot = 1;
     if (!slots[0].inserted && slots[1].inserted) active_slot = 1;
 
-    /* Dumpsys Telephony Registry (strictly scoped per Phone Id) */
+    /* Dumpsys Telephony Registry (strictly scoped per Phone Id, no early break) */
     FILE *p = popen("dumpsys telephony.registry 2>/dev/null", "r");
     if (p) {
         char line[2048];
         int cur_slot = -1;
         while (fgets(line, sizeof(line), p)) {
-            if (strstr(line, "local logs:") || strstr(line, "mPhoneCapability")) {
+            /* Only stop once logs section begins */
+            if (strstr(line, "local logs:")) {
                 break;
             }
 
@@ -524,13 +598,20 @@ static void get_all_sim_and_cellular_details(SimSlotInfo slots[2], int *out_acti
                 if (dp == 0 || dp == 1) active_slot = dp;
             }
 
+            char *def_s = strstr(line, "mDefaultSubId=");
+            if (def_s) {
+                int ds = atoi(def_s + 14);
+                if (ds > 0) sub = ds;
+            }
+
             if (cur_slot < 0 || cur_slot > 1) continue;
 
             /* ServiceState: Voice / Data registration & Operator */
             if (strstr(line, "mServiceState=")) {
                 char op_long[128] = "";
                 parse_string_after(line, "mOperatorAlphaLong=", op_long, sizeof(op_long), ",}\r\n");
-                if (strlen(op_long) > 0 && strcmp(op_long, "null") != 0) {
+                clean_prop_val(op_long);
+                if (is_valid_op_name(op_long)) {
                     strncpy(slots[cur_slot].operator_name, op_long, sizeof(slots[cur_slot].operator_name) - 1);
                 }
 
@@ -551,10 +632,17 @@ static void get_all_sim_and_cellular_details(SimSlotInfo slots[2], int *out_acti
             /* Data connection state */
             if (strstr(line, "mDataConnectionState=")) {
                 int dstate = parse_int_after(line, "mDataConnectionState=", -1);
-                if (dstate == 2) strcpy(slots[cur_slot].data_state, "connected");
-                else if (dstate == 1) strcpy(slots[cur_slot].data_state, "connecting");
-                else if (dstate == 3) strcpy(slots[cur_slot].data_state, "suspended");
-                else strcpy(slots[cur_slot].data_state, "disconnected");
+                if (dstate == 2) {
+                    strcpy(slots[cur_slot].data_state, "connected");
+                    /* Verified active data connection */
+                    active_slot = cur_slot;
+                } else if (dstate == 1) {
+                    strcpy(slots[cur_slot].data_state, "connecting");
+                } else if (dstate == 3) {
+                    strcpy(slots[cur_slot].data_state, "suspended");
+                } else {
+                    strcpy(slots[cur_slot].data_state, "disconnected");
+                }
             }
 
             /* Telephony Display Info (LTE, LTE_CA/4G+, NR/5G) */
@@ -590,19 +678,22 @@ static void get_all_sim_and_cellular_details(SimSlotInfo slots[2], int *out_acti
                 }
             }
 
-            /* Cell Identity (CI / CID) */
+            /* Cell Identity (CI / CID / 5G NCI) */
             char *cid = strstr(line, "mCellIdentity=");
             if (cid && !strstr(cid, "mCellIdentity=null")) {
-                long long ci = parse_ll_after(cid, "mCi=", -1);
+                long long ci = parse_ll_after(cid, "mNci=", -1); // 5G NR 36-bit NCI
+                if (ci <= 0 || ci == 2147483647) ci = parse_ll_after(cid, "nci=", -1);
+                if (ci <= 0 || ci == 2147483647) ci = parse_ll_after(cid, "mCi=", -1);
                 if (ci <= 0 || ci == 2147483647) ci = parse_ll_after(cid, "mCid=", -1);
                 if (ci <= 0 || ci == 2147483647) ci = parse_ll_after(cid, "cid=", -1);
                 if (ci > 0 && ci != 2147483647) {
                     slots[cur_slot].cell_id = ci;
                 }
-                if (strlen(slots[cur_slot].operator_name) == 0) {
+                if (!is_valid_op_name(slots[cur_slot].operator_name)) {
                     char alpha[64] = "";
                     parse_string_after(cid, "mAlphaLong=", alpha, sizeof(alpha), ",}\r\n");
-                    if (strlen(alpha) > 0 && strcmp(alpha, "null") != 0) {
+                    clean_prop_val(alpha);
+                    if (is_valid_op_name(alpha)) {
                         strncpy(slots[cur_slot].operator_name, alpha, sizeof(slots[cur_slot].operator_name) - 1);
                     }
                 }
@@ -890,9 +981,17 @@ static int cmd_info(void) {
     printf("\"local_ip\":"); json_print_escaped(src_ip);
     printf("},");
 
-    /* 6. Network health diagnosis */
-    int is_wifi = (strncmp(def_iface, "wlan", 4) == 0);
-    int is_cell = (strncmp(def_iface, "rmnet", 5) == 0 || strncmp(def_iface, "ccmni", 5) == 0 || strncmp(def_iface, "pdp", 3) == 0);
+    /* 6. Multi-vendor cellular modem interface identification */
+    int is_wifi = (strncmp(def_iface, "wlan", 4) == 0 || strncmp(def_iface, "swlan", 5) == 0);
+    int is_cell = (strncmp(def_iface, "rmnet", 5) == 0 ||
+                   strncmp(def_iface, "ccmni", 5) == 0 ||
+                   strncmp(def_iface, "cc2mni", 6) == 0 ||
+                   strncmp(def_iface, "seth", 4) == 0 ||
+                   strncmp(def_iface, "sipc", 4) == 0 ||
+                   strncmp(def_iface, "spbr", 4) == 0 ||
+                   strncmp(def_iface, "wwan", 4) == 0 ||
+                   strncmp(def_iface, "pdp", 3) == 0 ||
+                   strncmp(def_iface, "cellular", 8) == 0);
     get_network_health(is_wifi, is_cell, wifi_rssi, wifi_speed, cell_rsrp, cell_sinr);
     printf(",");
 
@@ -923,6 +1022,12 @@ static int cmd_info(void) {
     read_cmd_line("settings get global private_dns_specifier 2>/dev/null", dns_specifier, sizeof(dns_specifier));
     read_cmd_line("settings get global wifi_scan_throttle_enabled 2>/dev/null", wifi_throttle, sizeof(wifi_throttle));
     read_cmd_line("settings get global mobile_data_always_on 2>/dev/null", mobile_data_always, sizeof(mobile_data_always));
+
+    clean_prop_val(dns_mode);
+    clean_prop_val(dns_specifier);
+    clean_prop_val(wifi_throttle);
+    clean_prop_val(mobile_data_always);
+
     int dpi_active = (system("iptables -t mangle -C POSTROUTING -p tcp --dport 443 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1") == 0);
 
     printf("\"settings\":{");
@@ -1006,15 +1111,15 @@ static int cmd_dns_bench(void) {
 
             /* Standard DNS query for google.com (Type A) */
             unsigned char dns_query[] = {
-                0x12, 0x34, /* ID */
-                0x01, 0x00, /* Flags: Standard query, recursion desired */
-                0x00, 0x01, /* QDCOUNT = 1 */
+                0x12, 0x34,
+                0x01, 0x00,
+                0x00, 0x01,
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                 0x06, 'g', 'o', 'o', 'g', 'l', 'e',
                 0x03, 'c', 'o', 'm',
-                0x00,       /* Root label */
-                0x00, 0x01, /* QTYPE = A */
-                0x00, 0x01  /* QCLASS = IN */
+                0x00,
+                0x00, 0x01,
+                0x00, 0x01
             };
 
             if (sendto(sock, dns_query, sizeof(dns_query), 0, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) > 0) {
@@ -1036,7 +1141,6 @@ static int cmd_dns_bench(void) {
     return 0;
 }
 
-/* Set Cellular Network Mode / Band Lock */
 /* Set Cellular Network Mode / Band Lock across Android 10-16 */
 static int cmd_set_mode(int slot, const char *mode) {
     if (!mode || !is_safe_input(mode)) {
@@ -1118,35 +1222,36 @@ static int internal_set_tcp_cc(const char *algo) {
     return system(cmd);
 }
 
+/* Symmetric buffer profiles with Linux 4.x/5.x/6.x compatibility */
 static int internal_set_tcp_profile(const char *profile) {
     if (!profile || !is_safe_input(profile)) return -1;
-    int ret = 0;
     if (strcmp(profile, "gaming") == 0) {
-        ret |= system("sysctl -w net.ipv4.tcp_rmem='4096 87380 4194304' >/dev/null 2>&1");
-        ret |= system("sysctl -w net.ipv4.tcp_wmem='4096 16384 4194304' >/dev/null 2>&1");
-        ret |= system("sysctl -w net.ipv4.tcp_notsent_lowat=16384 >/dev/null 2>&1");
-        ret |= system("sysctl -w net.ipv4.tcp_low_latency=1 >/dev/null 2>&1");
+        system("sysctl -w net.ipv4.tcp_rmem='4096 87380 4194304' >/dev/null 2>&1");
+        system("sysctl -w net.ipv4.tcp_wmem='4096 16384 4194304' >/dev/null 2>&1");
+        system("sysctl -w net.core.rmem_max=4194304 >/dev/null 2>&1");
+        system("sysctl -w net.core.wmem_max=4194304 >/dev/null 2>&1");
+        system("sysctl -w net.ipv4.tcp_notsent_lowat=16384 >/dev/null 2>&1");
     } else if (strcmp(profile, "throughput") == 0) {
-        ret |= system("sysctl -w net.ipv4.tcp_rmem='8192 1048576 16777216' >/dev/null 2>&1");
-        ret |= system("sysctl -w net.ipv4.tcp_wmem='8192 1048576 16777216' >/dev/null 2>&1");
-        ret |= system("sysctl -w net.core.rmem_max=16777216 >/dev/null 2>&1");
-        ret |= system("sysctl -w net.core.wmem_max=16777216 >/dev/null 2>&1");
-        ret |= system("sysctl -w net.ipv4.tcp_window_scaling=1 >/dev/null 2>&1");
+        system("sysctl -w net.ipv4.tcp_rmem='8192 1048576 16777216' >/dev/null 2>&1");
+        system("sysctl -w net.ipv4.tcp_wmem='8192 1048576 16777216' >/dev/null 2>&1");
+        system("sysctl -w net.core.rmem_max=16777216 >/dev/null 2>&1");
+        system("sysctl -w net.core.wmem_max=16777216 >/dev/null 2>&1");
+        system("sysctl -w net.ipv4.tcp_window_scaling=1 >/dev/null 2>&1");
     } else if (strcmp(profile, "adaptive") == 0) {
-        ret |= system("sysctl -w net.ipv4.tcp_rmem='4096 524288 8388608' >/dev/null 2>&1");
-        ret |= system("sysctl -w net.ipv4.tcp_wmem='4096 524288 8388608' >/dev/null 2>&1");
-        ret |= system("sysctl -w net.core.rmem_max=8388608 >/dev/null 2>&1");
-        ret |= system("sysctl -w net.core.wmem_max=8388608 >/dev/null 2>&1");
-        ret |= system("sysctl -w net.ipv4.tcp_window_scaling=1 >/dev/null 2>&1");
+        system("sysctl -w net.ipv4.tcp_rmem='4096 524288 8388608' >/dev/null 2>&1");
+        system("sysctl -w net.ipv4.tcp_wmem='4096 524288 8388608' >/dev/null 2>&1");
+        system("sysctl -w net.core.rmem_max=8388608 >/dev/null 2>&1");
+        system("sysctl -w net.core.wmem_max=8388608 >/dev/null 2>&1");
+        system("sysctl -w net.ipv4.tcp_window_scaling=1 >/dev/null 2>&1");
     } else if (strcmp(profile, "stock") == 0) {
-        ret |= system("sysctl -w net.ipv4.tcp_rmem='4096 87380 6291456' >/dev/null 2>&1");
-        ret |= system("sysctl -w net.ipv4.tcp_wmem='4096 16384 4194304' >/dev/null 2>&1");
-        ret |= system("sysctl -w net.core.rmem_max=2097152 >/dev/null 2>&1");
-        ret |= system("sysctl -w net.core.wmem_max=2097152 >/dev/null 2>&1");
+        system("sysctl -w net.ipv4.tcp_rmem='4096 87380 6291456' >/dev/null 2>&1");
+        system("sysctl -w net.ipv4.tcp_wmem='4096 16384 4194304' >/dev/null 2>&1");
+        system("sysctl -w net.core.rmem_max=2097152 >/dev/null 2>&1");
+        system("sysctl -w net.core.wmem_max=2097152 >/dev/null 2>&1");
     } else {
         return -1;
     }
-    return ret;
+    return 0;
 }
 
 static int internal_set_dns(const char *mode, const char *specifier) {
@@ -1248,34 +1353,31 @@ static const char *BLACKHOLED_SUBNETS[] = {
     NULL
 };
 
+/* Standalone Zero-Python Cloudflare WARP Tunnel Setup */
 static void setup_warp_tunnel(int enable) {
     if (enable) {
-        /* Ensure persistent warp.conf exists */
+        /* Ensure persistent warp.conf exists without python3 dependency */
         if (access("/data/adb/hypernet/warp.conf", F_OK) != 0) {
-            system("python3 -c '\n"
-                   "import subprocess, urllib.request, json, os\n"
-                   "for wg in [\"/data/adb/modules/hypernet/system/bin/wg\", \"/data/data/com.termux/files/home/HyperNet_Module/system/bin/wg\", \"/data/data/com.termux/files/usr/bin/wg\"]:\n"
-                   "    if os.path.isfile(wg) and os.access(wg, os.X_OK):\n"
-                   "        break\n"
-                   "else:\n"
-                   "    wg = \"wg\"\n"
-                   "try:\n"
-                   "    priv = subprocess.check_output([wg, \"genkey\"]).decode().strip()\n"
-                   "    p = subprocess.Popen([wg, \"pubkey\"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)\n"
-                   "    pub, _ = p.communicate(priv.encode())\n"
-                   "    pub = pub.decode().strip()\n"
-                   "    req = urllib.request.Request(\"https://api.cloudflareclient.com/v0a2158/reg\",\n"
-                   "        data=json.dumps({\"install_id\":\"\",\"tos\":\"2020-04-20T00:00:00.000Z\",\"key\":pub,\"fcm_token\":\"\",\"type\":\"Android\",\"locale\":\"en_US\"}).encode(),\n"
-                   "        headers={\"Content-Type\":\"application/json; charset=UTF-8\",\"User-Agent\":\"okhttp/3.12.1\"})\n"
-                   "    with urllib.request.urlopen(req, timeout=10) as resp:\n"
-                   "        res = json.loads(resp.read().decode())\n"
-                   "    peer_pub = res[\"config\"][\"peers\"][0][\"public_key\"]\n"
-                   "    os.makedirs(\"/data/adb/hypernet\", exist_ok=True)\n"
-                   "    with open(\"/data/adb/hypernet/warp.conf\", \"w\") as f:\n"
-                   "        f.write(f\"[Interface]\\nPrivateKey = {priv}\\n\\n[Peer]\\nPublicKey = {peer_pub}\\nEndpoint = 162.159.192.1:2408\\nAllowedIPs = 0.0.0.0/0\\n\")\n"
-                   "    os.chmod(\"/data/adb/hypernet/warp.conf\", 0o600)\n"
-                   "except Exception:\n"
-                   "    pass\n"
+            system("sh -c '\n"
+                   "WG=\"/data/adb/modules/hypernet/system/bin/wg\"\n"
+                   "[ -x \"$WG\" ] || WG=\"/data/data/com.termux/files/home/HyperNet_Module/system/bin/wg\"\n"
+                   "[ -x \"$WG\" ] || WG=\"wg\"\n"
+                   "BB=\"\"\n"
+                   "for b in /data/adb/ksu/bin/busybox /data/adb/ap/bin/busybox /data/adb/magisk/busybox busybox; do\n"
+                   "    if command -v \"$b\" >/dev/null 2>&1 || [ -x \"$b\" ]; then BB=\"$b\"; break; fi\n"
+                   "done\n"
+                   "if [ -n \"$BB\" ] && { command -v \"$WG\" >/dev/null 2>&1 || [ -x \"$WG\" ]; }; then\n"
+                   "    PRIV=$($WG genkey 2>/dev/null)\n"
+                   "    PUB=$(echo \"$PRIV\" | $WG pubkey 2>/dev/null)\n"
+                   "    if [ -n \"$PRIV\" ] && [ -n \"$PUB\" ]; then\n"
+                   "        RES=$($BB wget -q -T 10 -O - --header=\"Content-Type: application/json; charset=UTF-8\" --header=\"User-Agent: okhttp/3.12.1\" --post-data=\"{\\\"install_id\\\":\\\"\\\",\\\"tos\\\":\\\"2020-04-20T00:00:00.000Z\\\",\\\"key\\\":\\\"$PUB\\\",\\\"fcm_token\\\":\\\"\\\",\\\"type\\\":\\\"Android\\\",\\\"locale\\\":\\\"en_US\\\"}\" https://api.cloudflareclient.com/v0a2158/reg 2>/dev/null)\n"
+                   "        PEER_PUB=$(echo \"$RES\" | grep -o '\"public_key\":\"[^\"]*' | head -n1 | cut -d'\"' -f4)\n"
+                   "        [ -z \"$PEER_PUB\" ] && PEER_PUB=\"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\"\n"
+                   "        mkdir -p /data/adb/hypernet\n"
+                   "        printf \"[Interface]\\nPrivateKey = %s\\n\\n[Peer]\\nPublicKey = %s\\nEndpoint = 162.159.192.1:2408\\nAllowedIPs = 0.0.0.0/0\\n\" \"$PRIV\" \"$PEER_PUB\" > /data/adb/hypernet/warp.conf\n"
+                   "        chmod 0600 /data/adb/hypernet/warp.conf\n"
+                   "    fi\n"
+                   "fi\n"
                    "' >/dev/null 2>&1");
         }
 
@@ -1287,20 +1389,24 @@ static void setup_warp_tunnel(int enable) {
 
         char cmd[512];
         system("ip link del dev hypernet-warp >/dev/null 2>&1");
-        system("ip link add dev hypernet-warp type wireguard >/dev/null 2>&1");
-        snprintf(cmd, sizeof(cmd), "%s setconf hypernet-warp /data/adb/hypernet/warp.conf >/dev/null 2>&1", wg);
-        system(cmd);
-        system("ip addr add 172.16.0.2/32 dev hypernet-warp >/dev/null 2>&1");
-        system("ip link set hypernet-warp up >/dev/null 2>&1");
 
-        for (int i = 0; BLACKHOLED_SUBNETS[i] != NULL; i++) {
-            snprintf(cmd, sizeof(cmd), "ip route add %s dev hypernet-warp table 1337 >/dev/null 2>&1", BLACKHOLED_SUBNETS[i]);
+        /* Validate kernel WireGuard module support */
+        int wg_ok = (system("ip link add dev hypernet-warp type wireguard >/dev/null 2>&1") == 0);
+        if (wg_ok) {
+            snprintf(cmd, sizeof(cmd), "%s setconf hypernet-warp /data/adb/hypernet/warp.conf >/dev/null 2>&1", wg);
             system(cmd);
-            snprintf(cmd, sizeof(cmd), "ip rule add to %s table 1337 priority 9000 >/dev/null 2>&1", BLACKHOLED_SUBNETS[i]);
-            system(cmd);
+            system("ip addr add 172.16.0.2/32 dev hypernet-warp >/dev/null 2>&1");
+            system("ip link set hypernet-warp up >/dev/null 2>&1");
+
+            for (int i = 0; BLACKHOLED_SUBNETS[i] != NULL; i++) {
+                snprintf(cmd, sizeof(cmd), "ip route add %s dev hypernet-warp table 1337 >/dev/null 2>&1", BLACKHOLED_SUBNETS[i]);
+                system(cmd);
+                snprintf(cmd, sizeof(cmd), "ip rule add to %s table 1337 priority 9000 >/dev/null 2>&1", BLACKHOLED_SUBNETS[i]);
+                system(cmd);
+            }
+
+            system("iptables -t nat -C POSTROUTING -o hypernet-warp -j MASQUERADE >/dev/null 2>&1 || iptables -t nat -A POSTROUTING -o hypernet-warp -j MASQUERADE >/dev/null 2>&1");
         }
-
-        system("iptables -t nat -C POSTROUTING -o hypernet-warp -j MASQUERADE >/dev/null 2>&1 || iptables -t nat -A POSTROUTING -o hypernet-warp -j MASQUERADE >/dev/null 2>&1");
     } else {
         for (int i = 0; BLACKHOLED_SUBNETS[i] != NULL; i++) {
             char cmd[256];
@@ -1324,19 +1430,19 @@ static int cmd_set_dpi_bypass(int enable) {
         system("iptables -t mangle -C POSTROUTING -p tcp --dport 80 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1 || iptables -t mangle -I POSTROUTING -p tcp --dport 80 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1");
         system("ip6tables -t mangle -C POSTROUTING -p tcp --dport 80 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1 || ip6tables -t mangle -I POSTROUTING -p tcp --dport 80 --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 536 >/dev/null 2>&1");
 
-        /* Block QUIC (HTTP/3 UDP 443) — forces browser fallback to TCP/TLS where MSS clamping works.
-         * ponytail: DROP not REJECT so browser degrades to TCP quickly rather than waiting for RST */
+        /* Block QUIC (HTTP/3 UDP 443) — forces browser fallback to TCP/TLS where MSS clamping works */
         system("iptables -C OUTPUT -p udp --dport 443 -j DROP >/dev/null 2>&1 || iptables -I OUTPUT -p udp --dport 443 -j DROP >/dev/null 2>&1");
         system("ip6tables -C OUTPUT -p udp --dport 443 -j DROP >/dev/null 2>&1 || ip6tables -I OUTPUT -p udp --dport 443 -j DROP >/dev/null 2>&1");
 
         /* If private DNS is off, automatically enable Cloudflare Anti-Censorship DNS */
         char curr_dns[64] = "";
         read_cmd_line("settings get global private_dns_mode 2>/dev/null", curr_dns, sizeof(curr_dns));
+        clean_prop_val(curr_dns);
         if (strcmp(curr_dns, "off") == 0 || strlen(curr_dns) == 0) {
             internal_set_dns("hostname", "1dot1dot1dot1.cloudflare-dns.com");
         }
 
-        /* Native WireGuard tunnel for BGP-blackholed networks (Pornhub, Redtube, etc.) */
+        /* Native WireGuard tunnel for BGP-blackholed networks */
         setup_warp_tunnel(1);
 
         system("mkdir -p /data/adb/modules/hypernet 2>/dev/null; echo '1' > /data/adb/modules/hypernet/dpi_bypass.conf; mkdir -p /data/adb/hypernet 2>/dev/null; echo '1' > /data/adb/hypernet/dpi_bypass.conf");
@@ -1358,7 +1464,7 @@ static int cmd_set_dpi_bypass(int enable) {
     return 0;
 }
 
-/* Check Site Reachability (Pure POSIX socket probe for blocked domains like www.reddit.com) */
+/* Check Site Reachability (Pure POSIX socket probe for blocked domains) */
 static int cmd_check_site(const char *domain) {
     if (!domain || !is_safe_input(domain)) {
         printf("{\"error\":\"invalid_domain\"}\n");
@@ -1556,6 +1662,7 @@ static int cmd_apply_boot(void) {
     /* 3. Restore DPI bypass if enabled */
     char dpi_cfg[16] = "";
     read_cmd_line("cat /data/adb/modules/hypernet/dpi_bypass.conf 2>/dev/null || cat /data/adb/hypernet/dpi_bypass.conf 2>/dev/null", dpi_cfg, sizeof(dpi_cfg));
+    clean_prop_val(dpi_cfg);
     if (strcmp(dpi_cfg, "1") == 0) {
         cmd_set_dpi_bypass(1);
     }
@@ -1563,29 +1670,28 @@ static int cmd_apply_boot(void) {
     return 0;
 }
 
-/* Standalone CLI Speedtest Engine via Pure POSIX Sockets */
-static int cmd_speedtest(int json_output, const char *server_id) {
+/* Standalone CLI Speedtest Engine via Pure POSIX Sockets with Configurable Duration */
+static int cmd_speedtest(int json_output, const char *server_id, int duration_sec) {
+    if (duration_sec <= 0) duration_sec = 8;
+    if (duration_sec > 60) duration_sec = 60;
+
     const char *target_host = "speed.cloudflare.com";
     const char *server_display = "Cloudflare Anycast";
-    const char *down_path = "/__down?bytes=2500000";
+    const char *down_path = "/__down?bytes=5000000";
     const char *up_path = "/__up";
     int can_upload = 1;
-    int up_size = 500000;
 
     if (server_id && strcmp(server_id, "cf_stream") == 0) {
         server_display = "Cloudflare Streaming";
-        down_path = "/__down?bytes=5000000";
-        up_size = 800000;
+        down_path = "/__down?bytes=10000000";
     } else if (server_id && strcmp(server_id, "cf_latency") == 0) {
         server_display = "Cloudflare Low-Latency";
-        down_path = "/__down?bytes=1000000";
-        up_size = 250000;
+        down_path = "/__down?bytes=2000000";
     } else if (server_id && (strcmp(server_id, "tele2") == 0 || strcmp(server_id, "speedtest.tele2.net") == 0)) {
         target_host = "speedtest.tele2.net";
         server_display = "Tele2 Edge Global";
-        down_path = "/1MB.zip";
+        down_path = "/10MB.zip";
         up_path = "/upload.php";
-        up_size = 250000;
     }
 
     struct addrinfo hints, *res;
@@ -1598,12 +1704,15 @@ static int cmd_speedtest(int json_output, const char *server_id) {
         return 1;
     }
 
-    /* 1. Latency measurement */
-    float ping_ms = 0.0f;
-    for (int i = 0; i < 3; i++) {
+    /* 1. Latency measurement (5 probes) */
+    float ping_min = 9999.0f, ping_max = 0.0f, ping_sum = 0.0f;
+    int ping_count = 0;
+    float prev_rtt = 0.0f, jitter_sum = 0.0f;
+
+    for (int i = 0; i < 5; i++) {
         int s = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
         if (s < 0) continue;
-        struct timeval tv = { .tv_sec = 1, .tv_usec = 500000 };
+        struct timeval tv = { .tv_sec = 1, .tv_usec = 200000 };
         setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
@@ -1617,93 +1726,132 @@ static int cmd_speedtest(int json_output, const char *server_id) {
             recv(s, buf, sizeof(buf), 0);
             clock_gettime(CLOCK_MONOTONIC, &t1);
             float rtt = (float)((t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_nsec - t0.tv_nsec) / 1000000.0);
-            if (ping_ms == 0.0f || rtt < ping_ms) ping_ms = rtt;
+            if (rtt > 0.1f) {
+                if (rtt < ping_min) ping_min = rtt;
+                if (rtt > ping_max) ping_max = rtt;
+                ping_sum += rtt;
+                if (ping_count > 0) {
+                    float diff = rtt - prev_rtt;
+                    if (diff < 0) diff = -diff;
+                    jitter_sum += diff;
+                }
+                prev_rtt = rtt;
+                ping_count++;
+            }
         }
         close(s);
     }
+    float ping_avg = ping_count > 0 ? (ping_sum / ping_count) : 0.0f;
+    float jitter = ping_count > 1 ? (jitter_sum / (ping_count - 1)) : 0.0f;
+    if (ping_min > 9000.0f) ping_min = 0.0f;
 
-    /* 2. Download benchmark with bounded duration */
+    /* 2. Download benchmark */
+    float down_duration = duration_sec * 0.55f;
+    if (down_duration < 2.0f) down_duration = 2.0f;
+
     float down_mbps = 0.0f;
-    int ds = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (ds >= 0) {
-        struct timeval dtv = { .tv_sec = 2, .tv_usec = 500000 };
+    unsigned long long total_down_bytes = 0;
+    struct timespec dst, ded;
+    clock_gettime(CLOCK_MONOTONIC, &dst);
+
+    while (1) {
+        clock_gettime(CLOCK_MONOTONIC, &ded);
+        float elapsed = (float)((ded.tv_sec - dst.tv_sec) + (ded.tv_nsec - dst.tv_nsec) / 1000000000.0);
+        if (elapsed >= down_duration) break;
+
+        int ds = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+        if (ds < 0) break;
+        struct timeval dtv = { .tv_sec = 2, .tv_usec = 0 };
         setsockopt(ds, SOL_SOCKET, SO_RCVTIMEO, &dtv, sizeof(dtv));
+
         if (connect(ds, res->ai_addr, res->ai_addrlen) == 0) {
             char req[256];
             snprintf(req, sizeof(req), "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", down_path, target_host);
             send(ds, req, strlen(req), 0);
             char recv_buf[16384];
-            size_t total_bytes = 0;
-            struct timespec st, ed;
-            clock_gettime(CLOCK_MONOTONIC, &st);
             while (1) {
                 ssize_t n = recv(ds, recv_buf, sizeof(recv_buf), 0);
                 if (n <= 0) break;
-                total_bytes += n;
-                clock_gettime(CLOCK_MONOTONIC, &ed);
-                float elapsed = (float)((ed.tv_sec - st.tv_sec) + (ed.tv_nsec - st.tv_nsec) / 1000000000.0);
-                if (elapsed >= 2.5f && total_bytes >= 300000) break;
-            }
-            clock_gettime(CLOCK_MONOTONIC, &ed);
-            float elapsed = (float)((ed.tv_sec - st.tv_sec) + (ed.tv_nsec - st.tv_nsec) / 1000000000.0);
-            if (elapsed > 0.05f && total_bytes > 500) {
-                down_mbps = (float)((total_bytes * 8.0) / (elapsed * 1000000.0));
+                total_down_bytes += n;
+                clock_gettime(CLOCK_MONOTONIC, &ded);
+                float cur_elapsed = (float)((ded.tv_sec - dst.tv_sec) + (ded.tv_nsec - dst.tv_nsec) / 1000000000.0);
+                if (cur_elapsed >= down_duration) break;
             }
         }
         close(ds);
     }
+    clock_gettime(CLOCK_MONOTONIC, &ded);
+    float total_down_time = (float)((ded.tv_sec - dst.tv_sec) + (ded.tv_nsec - dst.tv_nsec) / 1000000000.0);
+    if (total_down_time > 0.1f && total_down_bytes > 0) {
+        down_mbps = (float)((total_down_bytes * 8.0) / (total_down_time * 1000000.0));
+    }
 
-    /* 3. Upload benchmark with bounded duration */
+    /* 3. Upload benchmark (real POST payload, no mock ratio) */
+    float up_duration = duration_sec * 0.45f;
+    if (up_duration < 1.5f) up_duration = 1.5f;
+
     float up_mbps = 0.0f;
+    unsigned long long total_up_bytes = 0;
     if (can_upload && up_path) {
-        int us = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-        if (us >= 0) {
+        struct timespec ust, ued;
+        clock_gettime(CLOCK_MONOTONIC, &ust);
+        char chunk[16384];
+        memset(chunk, 'a', sizeof(chunk));
+
+        while (1) {
+            clock_gettime(CLOCK_MONOTONIC, &ued);
+            float elapsed = (float)((ued.tv_sec - ust.tv_sec) + (ued.tv_nsec - ust.tv_nsec) / 1000000000.0);
+            if (elapsed >= up_duration) break;
+
+            int us = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+            if (us < 0) break;
             struct timeval utv = { .tv_sec = 2, .tv_usec = 0 };
             setsockopt(us, SOL_SOCKET, SO_SNDTIMEO, &utv, sizeof(utv));
+
             if (connect(us, res->ai_addr, res->ai_addrlen) == 0) {
+                int send_size = 2000000;
                 char hdr[256];
-                snprintf(hdr, sizeof(hdr), "POST %s HTTP/1.1\r\nHost: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", up_path, target_host, up_size);
+                snprintf(hdr, sizeof(hdr), "POST %s HTTP/1.1\r\nHost: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", up_path, target_host, send_size);
                 send(us, hdr, strlen(hdr), 0);
-                char chunk[8192];
-                memset(chunk, '0', sizeof(chunk));
-                int remaining = up_size;
-                struct timespec st, ed;
-                clock_gettime(CLOCK_MONOTONIC, &st);
-                while (remaining > 0) {
-                    int to_send = remaining > (int)sizeof(chunk) ? (int)sizeof(chunk) : remaining;
+                int rem = send_size;
+                while (rem > 0) {
+                    int to_send = rem > (int)sizeof(chunk) ? (int)sizeof(chunk) : rem;
                     ssize_t sent = send(us, chunk, to_send, 0);
                     if (sent <= 0) break;
-                    remaining -= sent;
-                    clock_gettime(CLOCK_MONOTONIC, &ed);
-                    float elapsed = (float)((ed.tv_sec - st.tv_sec) + (ed.tv_nsec - st.tv_nsec) / 1000000000.0);
-                    if (elapsed >= 1.8f && (up_size - remaining) >= 150000) break;
+                    rem -= sent;
+                    total_up_bytes += sent;
+                    clock_gettime(CLOCK_MONOTONIC, &ued);
+                    float cur_elapsed = (float)((ued.tv_sec - ust.tv_sec) + (ued.tv_nsec - ust.tv_nsec) / 1000000000.0);
+                    if (cur_elapsed >= up_duration) break;
                 }
                 char resp[256];
                 recv(us, resp, sizeof(resp), 0);
-                clock_gettime(CLOCK_MONOTONIC, &ed);
-                float elapsed = (float)((ed.tv_sec - st.tv_sec) + (ed.tv_nsec - st.tv_nsec) / 1000000000.0);
-                if (elapsed > 0.05f) {
-                    up_mbps = (float)(((up_size - remaining) * 8.0) / (elapsed * 1000000.0));
-                }
             }
             close(us);
         }
-    } else {
-        up_mbps = down_mbps * 0.45f;
+        clock_gettime(CLOCK_MONOTONIC, &ued);
+        float total_up_time = (float)((ued.tv_sec - ust.tv_sec) + (ued.tv_nsec - ust.tv_nsec) / 1000000000.0);
+        if (total_up_time > 0.1f && total_up_bytes > 0) {
+            up_mbps = (float)((total_up_bytes * 8.0) / (total_up_time * 1000000.0));
+        }
     }
 
     freeaddrinfo(res);
 
+    float total_mb = (float)((total_down_bytes + total_up_bytes) / 1048576.0);
+
     if (json_output) {
-        printf("{\"ping_ms\":%.1f,\"download_mbps\":%.1f,\"upload_mbps\":%.1f,\"server\":", ping_ms, down_mbps, up_mbps);
+        printf("{\"ping_ms\":%.1f,\"min_ping_ms\":%.1f,\"max_ping_ms\":%.1f,\"jitter_ms\":%.1f,\"download_mbps\":%.1f,\"upload_mbps\":%.1f,\"download_bytes\":%llu,\"upload_bytes\":%llu,\"total_mb\":%.2f,\"duration_sec\":%d,\"server\":",
+               ping_avg, ping_min, ping_max, jitter, down_mbps, up_mbps, total_down_bytes, total_up_bytes, total_mb, duration_sec);
         json_print_escaped(server_display);
         printf("}\n");
     } else {
-        printf("hypernet speedtest results:\n");
-        printf("  latency:  %.1f ms\n", ping_ms);
-        printf("  download: %.1f mbps\n", down_mbps);
-        printf("  upload:   %.1f mbps\n", up_mbps);
-        printf("  server:   %s\n", server_display);
+        printf("hypernet speedtest results (%ds test):\n", duration_sec);
+        printf("  latency:  avg %.1f ms (min %.1f, max %.1f, jitter %.1f ms)\n", ping_avg, ping_min, ping_max, jitter);
+        printf("  download: %.1f mbps (%.2f MB)\n", down_mbps, (float)(total_down_bytes / 1048576.0));
+        printf("  upload:   %.1f mbps (%.2f MB)\n", up_mbps, (float)(total_up_bytes / 1048576.0));
+        printf("  total:    %.2f MB transferred\n", total_mb);
+        printf("  server:   %s (%s)\n", server_display, target_host);
     }
     return 0;
 }
@@ -1712,21 +1860,21 @@ static void print_usage(void) {
     printf("hypernet - standalone android network toolkit & bridge\n\n");
     printf("usage: libhypernet.so <command> [args...]\n\n");
     printf("commands:\n");
-    printf("  speedtest [--json] [srv] run standalone network speed test via socket\n");
-    printf("  info                    full network, wi-fi, cellular, and tcp diagnostics\n");
-    printf("  traffic                 per-interface rx/tx bytes from /proc/net/dev\n");
-    printf("  ping <host> [count]     safe icmp/socket latency and loss measurement\n");
-    printf("  dns_bench               dns resolution latency comparison\n");
-    printf("  set_mode <slot> <mode>  lock cellular band mode (5g_only|5g_lte|lte_only|3g_only|2g_only|auto)\n");
-    printf("  set_tcp_cc <algo>       switch tcp congestion control (bbr, cubic, reno)\n");
-    printf("  set_tcp_profile <prof>  apply buffer profile (gaming|throughput|stock)\n");
-    printf("  set_dns <mode> [host]   configure android private dns\n");
-    printf("  set_tweak <name> <val>  toggle tweaks (wifi_throttle|mobile_data_always|fast_open)\n");
-    printf("  set_dpi_bypass <0|1>    toggle anti-censorship DPI bypass (TCP MSS packet fragmentation)\n");
-    printf("  check_site [domain]     probe web access reachability (default: www.reddit.com)\n");
-    printf("  radio_refresh           toggle airplane mode to refresh cell tower attachment\n");
-    printf("  smart_optimize          intelligent hardware-tailored network & dns auto-tuning\n");
-    printf("  apply_boot              reapply saved network configurations on boot\n");
+    printf("  speedtest [--json] [srv] [dur] run standalone network speed test via socket\n");
+    printf("  info                           full network, wi-fi, cellular, and tcp diagnostics\n");
+    printf("  traffic                        per-interface rx/tx bytes from /proc/net/dev\n");
+    printf("  ping <host> [count]            safe icmp/socket latency and loss measurement\n");
+    printf("  dns_bench                      dns resolution latency comparison\n");
+    printf("  set_mode <slot> <mode>         lock cellular band mode (5g_only|5g_lte|lte_only|3g_only|2g_only|auto)\n");
+    printf("  set_tcp_cc <algo>              switch tcp congestion control (bbr, cubic, reno)\n");
+    printf("  set_tcp_profile <prof>         apply buffer profile (gaming|throughput|adaptive|stock)\n");
+    printf("  set_dns <mode> [host]          configure android private dns\n");
+    printf("  set_tweak <name> <val>         toggle tweaks (wifi_throttle|mobile_data_always|fast_open)\n");
+    printf("  set_dpi_bypass <0|1>           toggle anti-censorship DPI bypass (TCP MSS packet fragmentation)\n");
+    printf("  check_site [domain]            probe web access reachability (default: www.reddit.com)\n");
+    printf("  radio_refresh                  toggle airplane mode to refresh cell tower attachment\n");
+    printf("  smart_optimize                 intelligent hardware-tailored network & dns auto-tuning\n");
+    printf("  apply_boot                     reapply saved network configurations on boot\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -1740,11 +1888,17 @@ int main(int argc, char *argv[]) {
     if (strcmp(cmd, "speedtest") == 0) {
         int json_out = 0;
         const char *server_id = "cf";
+        int dur = 8;
         for (int i = 2; i < argc; i++) {
-            if (strcmp(argv[i], "--json") == 0) json_out = 1;
-            else server_id = argv[i];
+            if (strcmp(argv[i], "--json") == 0) {
+                json_out = 1;
+            } else if (isdigit((unsigned char)argv[i][0])) {
+                dur = atoi(argv[i]);
+            } else {
+                server_id = argv[i];
+            }
         }
-        return cmd_speedtest(json_out, server_id);
+        return cmd_speedtest(json_out, server_id, dur);
     } else if (strcmp(cmd, "info") == 0 || strcmp(cmd, "status") == 0) {
         return cmd_info();
     } else if (strcmp(cmd, "traffic") == 0) {
