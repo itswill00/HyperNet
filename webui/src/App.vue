@@ -49,7 +49,7 @@
     <!-- Main Content Area -->
     <main class="content-area">
       <!-- 1. SPEEDTEST TAB -->
-      <div v-show="activeTab === 'speed'" style="display: flex; flex-direction: column; gap: 12px;">
+      <div v-show="activeTab === 'speed'" class="tab-pane">
         <!-- Unified Hero Card -->
         <section class="md3-card speed-hero-card">
           <!-- Top Row: Route & Server selector -->
@@ -65,7 +65,7 @@
           </div>
 
           <!-- Digital Speed Readout & Phase Status -->
-          <div class="hero-gauge-area">
+          <div class="hero-gauge-area" :class="{ 'speed-testing-active': speedtestState.isTesting }">
             <div class="speed-digital-value">{{ speedtestState.instantSpeed.toFixed(1) }}</div>
             <div class="speed-digital-unit">
               {{ speedtestState.phase === 'upload' ? 'Upload Mbps' : (speedtestState.phase === 'download' ? 'Download Mbps' : 'Mbps throughput') }}
@@ -197,7 +197,7 @@
               <Icons name="clock" :size="13" />
               <span>Recent results ({{ speedHistory.length }})</span>
             </span>
-            <button class="btn btn-sm btn-secondary" @click="clearHistory">Clear</button>
+            <button class="btn btn-sm btn-secondary" @click="confirmClearHistory">Clear</button>
           </div>
           <div class="history-list">
             <div v-for="(h, idx) in speedHistory.slice(0, 5)" :key="idx" class="history-card" @click="showHistoryDetail(h)" style="cursor: pointer;">
@@ -228,7 +228,7 @@
       </div>
 
       <!-- 2. DIAGNOSTICS TAB -->
-      <div v-show="activeTab === 'diagnostics'" style="display: flex; flex-direction: column; gap: 12px;">
+      <div v-show="activeTab === 'diagnostics'" class="tab-pane">
         <!-- Network Health Hero Card -->
         <section class="health-hero-card">
           <div class="health-top-row">
@@ -419,7 +419,7 @@
       </div>
 
       <!-- 3. CELLULAR TAB -->
-      <div v-show="activeTab === 'cellular'" style="display: flex; flex-direction: column; gap: 12px;">
+      <div v-show="activeTab === 'cellular'" class="tab-pane">
         <!-- Multi-SIM Selector Strip -->
         <div v-if="telemetry.sim.slot0.inserted || telemetry.sim.slot1.inserted" class="sim-selector-strip">
           <button
@@ -527,7 +527,7 @@
               :key="mode.id"
               class="mode-card-compact"
               :class="{ selected: selectedCellularMode === mode.id }"
-              @click="applyCellularMode(mode.id)"
+              @click="confirmCellularMode(mode)"
             >
               <div class="mode-card-top">
                 <span class="mode-card-title">{{ mode.title }}</span>
@@ -540,7 +540,7 @@
       </div>
 
       <!-- 4. OPTIMIZER TAB -->
-      <div v-show="activeTab === 'optimizer'" style="display: flex; flex-direction: column; gap: 12px;">
+      <div v-show="activeTab === 'optimizer'" class="tab-pane">
         <!-- Intelligent Hardware Auto-Tuner Card -->
         <section class="md3-card">
           <div class="card-title-row">
@@ -576,7 +576,7 @@
             </div>
           </div>
 
-          <button class="btn btn-primary btn-block" :disabled="isOptimizing" @click="runSmartOptimize">
+          <button class="btn btn-primary btn-block" :disabled="isOptimizing" @click="confirmSmartOptimize">
             <Icons name="sliders" :size="14" :class="{ 'spin-anim': isOptimizing }" />
             <span>{{ isOptimizing ? 'Calibrating network stack...' : 'Optimize network configuration' }}</span>
           </button>
@@ -791,7 +791,7 @@
           </div>
 
           <!-- Restore Defaults Button -->
-          <button class="btn btn-secondary btn-block" @click="restoreDefaults" style="margin-top: 4px;">
+          <button class="btn btn-secondary btn-block" @click="confirmRestoreDefaults" style="margin-top: 4px;">
             <Icons name="refresh" :size="13" />
             <span>Restore kernel defaults</span>
           </button>
@@ -799,7 +799,7 @@
       </div>
 
       <!-- 5. CONSOLE TAB -->
-      <div v-show="activeTab === 'console'" style="display: flex; flex-direction: column; gap: 12px;">
+      <div v-show="activeTab === 'console'" class="tab-pane">
         <section class="md3-card">
           <div class="card-title-row">
             <span class="card-title">
@@ -826,11 +826,28 @@
     <!-- In-App Modal Dialog -->
     <div v-if="modalState.visible" class="modal-overlay" @click.self="modalState.visible = false">
       <div class="modal-dialog">
-        <div class="modal-title">{{ modalState.title }}</div>
-        <div class="modal-desc">{{ modalState.desc }}</div>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <Icons v-if="modalState.icon" :name="modalState.icon" :size="18" :style="{ color: modalState.isDanger ? 'var(--error, #cf6679)' : 'var(--primary)' }" />
+          <div class="modal-title">{{ modalState.title }}</div>
+        </div>
+        <div class="modal-desc" style="white-space: pre-line;">{{ modalState.desc }}</div>
         <div class="modal-actions">
-          <button class="btn btn-secondary" style="flex: 1;" @click="modalState.visible = false">Cancel</button>
-          <button class="btn btn-primary" style="flex: 1;" @click="onModalConfirm">Confirm</button>
+          <button
+            v-if="modalState.cancelText"
+            class="btn btn-secondary"
+            style="flex: 1;"
+            @click="modalState.visible = false"
+          >
+            {{ modalState.cancelText }}
+          </button>
+          <button
+            class="btn"
+            :class="modalState.isDanger ? 'btn-danger' : 'btn-primary'"
+            style="flex: 1;"
+            @click="onModalConfirm"
+          >
+            {{ modalState.confirmText || 'Confirm' }}
+          </button>
         </div>
       </div>
     </div>
@@ -1188,7 +1205,25 @@ function durationLabel(sec) {
 function showHistoryDetail(h) {
   modalState.title = `Benchmark Results (${h.date})`
   modalState.desc = `Server: ${h.server || 'Anycast'}\nDownload: ${h.download} Mbps\nUpload: ${h.upload} Mbps\nPing: ${h.ping} ms (min ${h.minPing || h.ping}, max ${h.maxPing || h.ping} ms, jitter ±${h.jitter || 0} ms)\nBufferbloat: ${h.bufferbloatGrade ? h.bufferbloatGrade + ' (+' + (h.bufferbloatDelta || 0) + ' ms)' : 'Optimal'}\nPayload: ${h.bytesUsedMb ? h.bytesUsedMb.toFixed(1) + ' MB' : '--'}\nDuration: ${h.durationSec || 10}s`
-  modalAction = null
+  modalState.icon = 'gauge'
+  modalState.isDanger = false
+  modalState.confirmText = 'Close'
+  modalState.cancelText = ''
+  modalState.action = () => { modalState.visible = false }
+  modalState.visible = true
+}
+
+function confirmClearHistory() {
+  modalState.title = 'Clear speedtest history?'
+  modalState.desc = 'All recorded benchmark results and throughput logs will be permanently deleted from local storage.'
+  modalState.icon = 'trash'
+  modalState.isDanger = true
+  modalState.confirmText = 'Clear history'
+  modalState.cancelText = 'Cancel'
+  modalState.action = () => {
+    modalState.visible = false
+    clearHistory()
+  }
   modalState.visible = true
 }
 
@@ -1372,6 +1407,25 @@ async function applyCellularMode(modeId) {
   }
 }
 
+function confirmCellularMode(mode) {
+  if (mode.id === selectedCellularMode.value) return
+  if (mode.id === 'auto') {
+    applyCellularMode(mode.id)
+    return
+  }
+  modalState.title = `Switch to ${mode.title}?`
+  modalState.desc = `Locking cellular radio to ${mode.desc} on SIM ${selectedSimSlot.value + 1}.\n\nIf signal is weak or unavailable in your area, voice calls and mobile data may disconnect until unlocked.`
+  modalState.icon = 'radio'
+  modalState.isDanger = false
+  modalState.confirmText = 'Apply lock'
+  modalState.cancelText = 'Cancel'
+  modalState.action = () => {
+    modalState.visible = false
+    applyCellularMode(mode.id)
+  }
+  modalState.visible = true
+}
+
 /* Intelligent Auto-Tuner */
 async function runSmartOptimize() {
   isOptimizing.value = true
@@ -1389,6 +1443,20 @@ async function runSmartOptimize() {
   } finally {
     isOptimizing.value = false
   }
+}
+
+function confirmSmartOptimize() {
+  modalState.title = 'Optimize network stack?'
+  modalState.desc = `Run auto-calibration for ${telemetry.device.brand || 'Device'} ${telemetry.device.model}?\n\nThis will probe DNS latency, calculate optimal TCP socket buffers for your ${telemetry.device.ram_tier || 'standard'} RAM tier, and activate low-latency kernel queues.`
+  modalState.icon = 'sliders'
+  modalState.isDanger = false
+  modalState.confirmText = 'Optimize now'
+  modalState.cancelText = 'Cancel'
+  modalState.action = async () => {
+    modalState.visible = false
+    await runSmartOptimize()
+  }
+  modalState.visible = true
 }
 
 /* TCP Congestion Control */
@@ -1538,17 +1606,39 @@ async function restoreDefaults() {
   showToast('Restored default network configuration')
 }
 
+function confirmRestoreDefaults() {
+  modalState.title = 'Restore kernel defaults?'
+  modalState.desc = 'This will reset all TCP buffer allocations to kernel stock, revert congestion control to Cubic, disable DNS overrides, and restore system power-saving toggles.'
+  modalState.icon = 'refresh'
+  modalState.isDanger = true
+  modalState.confirmText = 'Restore defaults'
+  modalState.cancelText = 'Keep settings'
+  modalState.action = async () => {
+    modalState.visible = false
+    await restoreDefaults()
+  }
+  modalState.visible = true
+}
+
 /* Modal Dialog State */
 const modalState = reactive({
   visible: false,
   title: '',
   desc: '',
+  icon: 'alert',
+  isDanger: false,
+  confirmText: 'Confirm',
+  cancelText: 'Cancel',
   action: null
 })
 
 function confirmRadioRefresh() {
   modalState.title = 'Refresh cellular connection?'
   modalState.desc = 'This temporarily cycles the airplane mode interface to drop stale data contexts and renegotiate attachment with the optimal base station. Connectivity will briefly pause for two seconds.'
+  modalState.icon = 'refresh'
+  modalState.isDanger = false
+  modalState.confirmText = 'Refresh radio'
+  modalState.cancelText = 'Cancel'
   modalState.action = async () => {
     modalState.visible = false
     showToast('Refreshing radio connection...')
@@ -1560,6 +1650,7 @@ function confirmRadioRefresh() {
 
 function onModalConfirm() {
   if (modalState.action) modalState.action()
+  else modalState.visible = false
 }
 
 /* Console Tab Commands */
