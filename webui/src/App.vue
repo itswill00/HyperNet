@@ -806,18 +806,47 @@
               <Icons name="terminal" :size="14" />
               <span>Network diagnostic console</span>
             </span>
-            <button class="btn btn-sm btn-secondary" @click="consoleOutput = ''">Clear</button>
+            <div style="display: flex; gap: 6px;">
+              <button class="btn btn-sm btn-secondary" @click="copyConsoleOutput" :disabled="!consoleOutput">
+                Copy
+              </button>
+              <button class="btn btn-sm btn-secondary" @click="consoleOutput = ''">
+                Clear
+              </button>
+            </div>
           </div>
-          <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px;">
-            <button class="btn btn-sm btn-secondary" @click="runConsoleCmd('info')">Status</button>
-            <button class="btn btn-sm btn-secondary" @click="runConsoleCmd('routes')">Routes</button>
-            <button class="btn btn-sm btn-secondary" @click="runConsoleCmd('speedtest')">Speedtest</button>
-            <button class="btn btn-sm btn-secondary" @click="runConsoleCmd('ping')">Ping 1.1.1.1</button>
-            <button class="btn btn-sm btn-secondary" @click="runConsoleCmd('dns_bench')">DNS bench</button>
-            <button class="btn btn-sm btn-secondary" @click="runConsoleCmd('auto_tune')">Auto-tune</button>
+
+          <!-- Diagnostic Action Cards Grid -->
+          <div class="console-cmd-grid" style="margin-top: 2px;">
+            <div
+              v-for="cmd in consoleCmds"
+              :key="cmd.id"
+              class="console-cmd-card"
+              :class="{
+                running: runningCmd === cmd.id,
+                disabled: runningCmd && runningCmd !== cmd.id
+              }"
+              @click="runConsoleCmd(cmd.id)"
+            >
+              <div class="console-cmd-icon">
+                <Icons
+                  :name="cmd.icon"
+                  :size="15"
+                  :class="{ 'spin-anim': runningCmd === cmd.id }"
+                />
+              </div>
+              <div class="console-cmd-info">
+                <span class="console-cmd-name">{{ cmd.name }}</span>
+                <span class="console-cmd-desc">
+                  {{ runningCmd === cmd.id ? 'Running probe...' : cmd.desc }}
+                </span>
+              </div>
+            </div>
           </div>
-          <div class="console-box" style="margin-top: 8px;">
-            {{ consoleOutput || 'Console ready. Execute diagnostic commands above.' }}
+
+          <!-- Console Terminal Output -->
+          <div ref="consoleBoxRef" class="console-box" style="margin-top: 10px;">
+            {{ consoleOutput || 'Console ready. Select a diagnostic action above to run.' }}
           </div>
         </section>
       </div>
@@ -861,7 +890,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import Icons from './components/Icons.vue'
 import { SpeedTestEngine } from './helpers/speedtest.js'
 import { runBridge, runBridgeJson, execCommand } from './helpers/shell.js'
@@ -1655,24 +1684,118 @@ function onModalConfirm() {
 
 /* Console Tab Commands */
 const consoleOutput = ref('')
+const runningCmd = ref('')
+const consoleBoxRef = ref(null)
+
+const consoleCmds = [
+  { id: 'info', name: 'Module Status', desc: 'Hardware, SIM & Wi-Fi', icon: 'radio' },
+  { id: 'ping', name: 'Ping 1.1.1.1', desc: 'Direct latency probe', icon: 'clock' },
+  { id: 'speedtest', name: 'Socket Speed', desc: '3s throughput probe', icon: 'speed' },
+  { id: 'dns_bench', name: 'DNS Benchmark', desc: 'Query 4 resolvers', icon: 'globe' },
+  { id: 'routes', name: 'IP Routing', desc: 'Kernel routing table', icon: 'terminal' },
+  { id: 'auto_tune', name: 'Stack Tune', desc: 'TCP & socket buffer tune', icon: 'sliders' }
+]
+
+function scrollConsoleBottom() {
+  if (consoleBoxRef.value) {
+    consoleBoxRef.value.scrollTop = consoleBoxRef.value.scrollHeight
+  }
+}
+
+function formatJsonOutput(raw) {
+  if (!raw) return ''
+  try {
+    const obj = JSON.parse(raw)
+    return JSON.stringify(obj, null, 2)
+  } catch {
+    return raw
+  }
+}
+
+function formatPingOutput(raw) {
+  if (!raw) return ''
+  try {
+    const p = JSON.parse(raw)
+    if (p.host) {
+      return `Ping ${p.host} (${p.transmitted} probes):\n  Latency: avg ${p.avg_ms} ms (min ${p.min_ms}, max ${p.max_ms})\n  Jitter:  ±${p.jitter_ms} ms\n  Loss:    ${p.loss_pct}% (${p.received}/${p.transmitted} received)`
+    }
+  } catch {}
+  return raw
+}
+
+function formatDnsOutput(raw) {
+  if (!raw) return ''
+  try {
+    const arr = JSON.parse(raw)
+    if (Array.isArray(arr)) {
+      const lines = ['DNS Resolver Benchmark:']
+      arr.forEach((d, i) => {
+        lines.push(`  ${i + 1}. ${d.name.padEnd(12)} (${d.ip}) : ${d.latency_ms > 0 ? d.latency_ms + ' ms' : 'timeout'}`)
+      })
+      return lines.join('\n')
+    }
+  } catch {}
+  return raw
+}
+
+async function copyConsoleOutput() {
+  if (!consoleOutput.value) return
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(consoleOutput.value)
+    } else {
+      const ta = document.createElement('textarea')
+      ta.value = consoleOutput.value
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+    showToast('Console output copied')
+  } catch {
+    showToast('Failed to copy')
+  }
+}
 
 async function runConsoleCmd(cmdType) {
-  consoleOutput.value = `[${new Date().toLocaleTimeString()}] Executing ${cmdType}...\n`
-  let out = ''
-  if (cmdType === 'info') {
-    out = await runBridge('info')
-  } else if (cmdType === 'routes') {
-    out = await execCommand('ip route show table 0 2>/dev/null || ip route')
-  } else if (cmdType === 'speedtest') {
-    out = await runBridge('speedtest')
-  } else if (cmdType === 'ping') {
-    out = await runBridge('ping', '1.1.1.1', '3')
-  } else if (cmdType === 'dns_bench') {
-    out = await runBridge('dns_bench')
-  } else if (cmdType === 'auto_tune') {
-    out = await runBridge('smart_optimize')
+  if (runningCmd.value) return
+  runningCmd.value = cmdType
+
+  const cmdObj = consoleCmds.find(c => c.id === cmdType)
+  const cmdTitle = cmdObj ? cmdObj.name : cmdType
+
+  const timeStr = new Date().toLocaleTimeString()
+  consoleOutput.value += `${consoleOutput.value ? '\n' : ''}[${timeStr}] ⚡ Running ${cmdTitle}...\n`
+  await nextTick()
+  scrollConsoleBottom()
+
+  try {
+    let out = ''
+    if (cmdType === 'info') {
+      const raw = await runBridge('info')
+      out = formatJsonOutput(raw)
+    } else if (cmdType === 'routes') {
+      out = await execCommand('ip route show table 0 2>/dev/null || ip route')
+    } else if (cmdType === 'speedtest') {
+      out = await runBridge('speedtest', 'cf_latency', '3')
+    } else if (cmdType === 'ping') {
+      const raw = await runBridge('ping', '1.1.1.1', '2')
+      out = formatPingOutput(raw)
+    } else if (cmdType === 'dns_bench') {
+      const raw = await runBridge('dns_bench')
+      out = formatDnsOutput(raw)
+    } else if (cmdType === 'auto_tune') {
+      const raw = await runBridge('smart_optimize')
+      out = formatJsonOutput(raw)
+    }
+    consoleOutput.value += (out ? out.trim() : 'Command finished with empty output.') + '\n'
+  } catch (e) {
+    consoleOutput.value += `Execution error: ${e.message || e}\n`
+  } finally {
+    runningCmd.value = ''
+    await nextTick()
+    scrollConsoleBottom()
   }
-  consoleOutput.value += (out || 'Command finished with empty output.') + '\n'
 }
 
 onMounted(() => {
